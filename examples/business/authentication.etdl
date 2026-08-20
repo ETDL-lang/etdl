@@ -1,0 +1,69 @@
+etdl: "1.0.0"
+info:
+  title: "Authentication"
+  version: "1.0.0"
+  domain: "AuthContext"
+asyncapi_imports:
+  api: "./asyncapi/common.yaml"
+eventTrees:
+  Authentication:
+    description: "Authentication."
+    initiatingEvent:
+      id: LoginAttempted
+      message: "api#/components/messages/Event"
+      next: CredentialCheck
+    nodes:
+      CredentialCheck:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.97
+            next: IssueTokenOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.03
+            next: AuthServiceFailed
+      IssueTokenOperation:
+        type: operation
+        action: execute
+        handler: "issue_token_handler"
+        emits: "api#/components/messages/Success"
+        next: AuthenticationSucceeded
+        onFailure: AuthServiceFailed
+        onFailureProbabilitySource: "#/faultTrees/AuthServiceFailure/topEvent"
+        retryPolicy:
+          maxAttempts: 3
+          backoffMs: 250
+          backoffStrategy: exponential
+        timeoutMs: 5000
+      AuthenticationSucceeded:
+        type: consequence
+        operation: send
+        channel: "api#/channels/OutcomeChannel"
+        message: "api#/components/messages/Success"
+      AuthServiceFailed:
+        type: consequence
+        operation: send
+        channel: "api#/channels/DeadLetterChannel"
+        message: "api#/components/messages/Failed"
+faultTrees:
+  AuthServiceFailure:
+    description: "Authentication failure."
+    topEvent:
+      id: AuthServiceFailed
+      description: "Authentication fails."
+      rootCause: IdentityOrToken
+    gates:
+      IdentityOrToken:
+        type: OR
+        inputs:
+          - IdentityDown
+          - TokenServiceError
+    basicEvents:
+      IdentityDown:
+        description: "IdentityDown."
+        probability: 0.003
+      TokenServiceError:
+        description: "TokenServiceError."
+        probability: 0.004

@@ -1,0 +1,76 @@
+# std.logic — reusable named boolean composition.
+#
+# ETDL already has AND/OR/NOT/XOR/VOTING as native gate types (see
+# `docs/reference/standard-library.md`'s core-vs-library rule: this library
+# does not redefine them). What it provides instead is a small set of named,
+# documented COMPOSITION PATTERNS built from those core gate types, over
+# three neutral placeholder inputs (`SignalA`, `SignalB`, `SignalC`).
+#
+# "Signal" is used deliberately instead of "event" here: this module is
+# about pure boolean combination, independent of what the inputs mean.
+# A signal has no probability of its own — it is not an occurrence, a
+# failure, or a success; it is a description-only placeholder standing in
+# for whatever boolean input the importing document supplies.
+#
+# ## Reuse pattern: override, not parameterize
+#
+# ETDL has no function/template mechanism — a gate's `inputs:` are fixed
+# string ids, not parameters a caller can substitute at import time. The
+# reuse mechanism this version actually has is override: a document that
+# imports `std.logic.AnyOf` and separately declares its OWN basic event
+# under the qualified id `std.logic.SignalA` (with a real probability) gets
+# "OR of MY SignalA, and the library's SignalB/SignalC defaults" — the
+# local declaration always wins over the library's placeholder. Override
+# every placeholder input a gate uses to fully repurpose it.
+#
+# True caller-supplied parameterization (substituting arbitrary inputs into
+# a reusable gate template without overriding every placeholder by name) is
+# NOT implemented and would require a new core primitive (a template/macro
+# gate). This is a deliberate, documented limitation — see
+# `docs/reference/standard-library.md` for the proposal and why it is
+# deferred rather than force-fit into this version.
+#
+# This file is ordinary ETDL: the same `components` schema (`gates`,
+# `basic_events`) any document already uses. No native (Rust) component.
+
+etdl: "1.0.0"
+
+library:
+  name: std.logic
+  version: "1.0"
+  description: >-
+    Named boolean composition patterns (AnyOf, AllOf, MajorityOf,
+    ExactlyOneOf) built from ETDL's native AND/OR/VOTING/XOR gate types,
+    over overridable placeholder signals. Domain-neutral: carries no
+    probability, failure, or reliability semantics of its own.
+
+components:
+  basic_events:
+    SignalA:
+      description: "a boolean input signal (placeholder — override with your own basic event, or supply a probability, to use it)"
+    SignalB:
+      description: "a boolean input signal (placeholder — override with your own basic event, or supply a probability, to use it)"
+    SignalC:
+      description: "a boolean input signal (placeholder — override with your own basic event, or supply a probability, to use it)"
+
+  gates:
+    AnyOf:
+      type: OR
+      description: "true when at least one of SignalA, SignalB, SignalC is true"
+      inputs: ["std.logic.SignalA", "std.logic.SignalB", "std.logic.SignalC"]
+
+    AllOf:
+      type: AND
+      description: "true only when SignalA, SignalB, and SignalC are all true"
+      inputs: ["std.logic.SignalA", "std.logic.SignalB", "std.logic.SignalC"]
+
+    MajorityOf:
+      type: VOTING
+      k: 2
+      description: "true when at least 2 of SignalA, SignalB, SignalC are true"
+      inputs: ["std.logic.SignalA", "std.logic.SignalB", "std.logic.SignalC"]
+
+    ExactlyOneOf:
+      type: XOR
+      description: "true when exactly one of SignalA, SignalB is true (XOR is defined for exactly 2 inputs)"
+      inputs: ["std.logic.SignalA", "std.logic.SignalB"]

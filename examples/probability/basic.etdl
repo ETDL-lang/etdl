@@ -1,0 +1,53 @@
+# Example: std.probability's ETDL-source half — reusable constants.
+#
+# The compositional math (complement, independent AND/OR, Bayes' rule) and
+# the foundational distributions are a Rust API (etdl-probability-core),
+# not something ETDL YAML can call — see
+# examples/probability/composition.rs and
+# docs/reference/standard-probability-library.md for why. This document
+# demonstrates the part that genuinely IS pure ETDL: std.probability's
+# named constants, used exactly like any other basic event.
+
+etdl: "1.0.0"
+info:
+  title: "Probability Constants Demo"
+  version: "1.0.0"
+  domain: "DemoContext"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+libraries:
+  - name: std.probability
+    version: "1.0"
+
+eventTrees:
+  T:
+    initiatingEvent:
+      id: I
+      message: "api#/components/messages/Request"
+      next: C
+    nodes:
+      C:
+        type: consequence
+        operation: terminate
+
+faultTrees:
+  # A tautology check: a gate that must always evaluate to a fixed
+  # probability regardless of its other input, useful as a documented
+  # "this branch is always/never taken" placeholder while a model is being
+  # built out — the same role std.logic's placeholder signals play for
+  # boolean composition, but for probability constants specifically.
+  AlwaysFires:
+    topEvent:
+      id: Top
+      description: "demonstrates std.probability.Certain forcing the OR gate to 1.0"
+      rootCause: G
+    gates:
+      G:
+        type: OR
+        inputs: ["std.probability.Certain", "LocalCondition"]
+    basicEvents:
+      LocalCondition:
+        description: "an ordinary, locally-declared basic event"
+        probability: 0.1

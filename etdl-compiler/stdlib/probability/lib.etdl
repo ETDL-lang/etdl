@@ -1,0 +1,45 @@
+# std.probability — reusable, well-known probability constants.
+#
+# This is the SMALL, honestly-scoped ETDL-source half of the standard
+# probability library. The actual mathematical API — complement,
+# independent AND/OR, conditional probability, Bayes' rule, and the
+# Bernoulli/Binomial/Beta/Exponential/Normal distributions — is the
+# `etdl-probability-core` Rust crate, not this file.
+#
+# Why: ETDL is a declarative YAML document format with no general
+# expression or function-call syntax. There is no honest way to write
+# "compute the complement of a referenced probability" as ETDL YAML — the
+# only thing genuinely expressible here is a NAMED, REUSABLE probability
+# VALUE (the "probability literal" concept), using the exact same
+# `basic_events` schema `std.events`/`std.logic` already use. See
+# `docs/reference/standard-probability-library.md`.
+#
+# This file has no native (Rust) component of its own: it is exactly this
+# one file, resolved and spliced by the same qualified-id mechanism as
+# every other stdlib module.
+
+etdl: "1.0.0"
+
+library:
+  name: std.probability
+  version: "1.0"
+  description: >-
+    Well-known, reusable probability constants (Certain, Impossible,
+    EvenOdds) as basic events. The compositional math (complement,
+    independent AND/OR, conditional probability, Bayes' rule) and the
+    foundational distributions live in the etdl-probability-core crate,
+    not in ETDL source — see the file header.
+
+components:
+  basic_events:
+    Certain:
+      description: "P = 1, exactly. An event that always occurs."
+      probability: 1.0
+
+    Impossible:
+      description: "P = 0, exactly. An event that never occurs."
+      probability: 0.0
+
+    EvenOdds:
+      description: "P = 0.5. An event as likely to occur as not."
+      probability: 0.5

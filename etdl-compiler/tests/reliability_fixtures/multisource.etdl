@@ -1,0 +1,71 @@
+etdl: "1.0.0"
+info:
+  title: "Multi-source, multi-tree resolution"
+  version: "1.0.0"
+  domain: "PaymentsContext"
+asyncapi_imports:
+  api: "./api.yaml"
+supplements:
+  - id: etdl.reliability
+    version: "1.0"
+eventTrees:
+  PaymentProcessing:
+    initiatingEvent:
+      id: PaymentRequested
+      message: "api#/components/messages/Event"
+      next: Done
+    nodes:
+      Done:
+        type: consequence
+        operation: terminate
+faultTrees:
+  Alpha:
+    topEvent:
+      id: TopAlpha
+      description: "Alpha tree"
+      rootCause: PowerLoss
+    gates:
+      PowerLoss:
+        type: OR
+        inputs:
+          - GeneratorFail
+          - BatteryFail
+    basicEvents:
+      GeneratorFail:
+        description: "Generator failed."
+        probability: 0.5
+        x-reliability:
+          source: gen
+          estimate: est.gen
+      BatteryFail:
+        description: "Battery failed."
+        probability: 0.01
+  Beta:
+    topEvent:
+      id: TopBeta
+      description: "Beta tree"
+      rootCause: PowerLoss
+    gates:
+      PowerLoss:
+        type: OR
+        inputs:
+          - GeneratorFail
+          - BatteryFail
+    basicEvents:
+      GeneratorFail:
+        description: "Generator failed."
+        probability: 0.5
+        x-reliability:
+          source: grid
+          estimate: est.grid
+      BatteryFail:
+        description: "Battery failed."
+        probability: 0.01
+x-reliability:
+  sources:
+    - id: gen
+      type: external
+      file: "./gen.rprob"
+    - id: grid
+      type: external
+      file: "./grid.rprob"

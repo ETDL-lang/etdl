@@ -1,0 +1,41 @@
+etdl: "1.0.0"
+info:
+  title: "Gateway Service"
+  version: "1.0.0"
+  domain: "PaymentsContext"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+libraries:
+  - name: std.events
+    version: "1.0"
+
+eventTrees:
+  RequestHandling:
+    initiatingEvent:
+      id: RequestReceived
+      message: "api#/components/messages/Request"
+      next: Complete
+    nodes:
+      Complete:
+        type: consequence
+        operation: terminate
+
+faultTrees:
+  GatewayUnavailable:
+    topEvent:
+      id: Top
+      description: "the gateway cannot serve requests"
+      rootCause: G
+    gates:
+      G:
+        type: OR
+        # `std.events.NetworkTimeout` is a library-provided basic event —
+        # nothing here declares it locally; it is resolved from the
+        # built-in standard library and spliced in before validation runs.
+        inputs: ["std.events.NetworkTimeout", "LocalDiskFull"]
+    basicEvents:
+      LocalDiskFull:
+        description: "the gateway's local disk is full"
+        probability: 0.0003

@@ -1,0 +1,15 @@
+schema: etdl.reliability.artifact/1.0
+id: generator
+version: "1.0.0"
+estimates:
+  est.gen:
+    event: est.gen
+    state: estimated
+    value: 0.001
+    metric: probability
+    population: power_plant
+    time_basis: per-mission
+    source: measurement
+    provenance:
+      source_type: measurement
+      dataset: gen-fleet-2026

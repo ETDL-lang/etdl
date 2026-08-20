@@ -1,0 +1,57 @@
+# Example 2: the reliability domain interpreting a generic tree.
+#
+# Structurally this is the same OR-of-two-leaves shape as generic.etdl —
+# the Generic Tree Event Supplement does not know or care that this one
+# will be interpreted as a reliability concern. The reliability-specific
+# meaning (these are failure conditions; the root is a "top event" in the
+# reliability sense) is entirely in how a CONSUMER (see
+# etdl-reliability/examples/tree_to_artifact.rs) reads this structure —
+# not in anything this document declares.
+
+etdl: "1.0.0"
+info:
+  title: "Reliability Consumer Demo"
+  version: "1.0.0"
+  domain: "PaymentsContext"
+
+supplements:
+  - id: etdl.tree-event
+    version: "1.0"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+eventTrees:
+  T:
+    initiatingEvent:
+      id: I
+      message: "api#/components/messages/Request"
+      next: C
+    nodes:
+      C:
+        type: consequence
+        operation: terminate
+
+x-tree-event:
+  trees:
+    - id: "payment-gateway-availability"
+      version: "1"
+      root: "GatewayUnavailable"
+      description: >-
+        A reliability engineer's tree: GatewayUnavailable when either a
+        network timeout or a database failure occurs. The tree supplement
+        only sees an OR gate over two leaves — see
+        etdl-reliability/examples/tree_to_artifact.rs for the reliability
+        interpretation (leaf probabilities, independence assumption,
+        ReliabilityArtifact) applied on top of this structure.
+      nodes:
+        NetworkTimeout:
+          kind: leaf
+          event_ref: "std.events.NetworkTimeout"
+        DatabaseFailure:
+          kind: leaf
+          description: "the database did not respond"
+        GatewayUnavailable:
+          kind: gate
+          gate: OR
+          children: ["NetworkTimeout", "DatabaseFailure"]

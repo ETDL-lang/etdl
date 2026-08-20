@@ -1,0 +1,84 @@
+etdl: "1.0.0"
+info:
+  title: "Advanced Fault Tree Features"
+  version: "1.0.0"
+  domain: "ReliabilityContext"
+
+asyncapi_imports:
+  api: "./asyncapi/api.yaml"
+
+eventTrees:
+  SampleTree:
+    initiatingEvent:
+      id: SampleTrigger
+      message: "api#/components/messages/Sample"
+      next: Consequence
+    nodes:
+      Consequence:
+        type: consequence
+        operation: terminate
+
+faultTrees:
+  AdvancedTree:
+    description: "Exercises INHIBIT, PRIORITY_AND, eventType, and transfers."
+    topEvent:
+      id: SystemFailure
+      description: "System fails."
+      rootCause: RootOr
+    gates:
+      RootOr:
+        type: OR
+        inputs:
+          - InhibitedFailure
+          - PriorityFailure
+          - ExternalCause
+          - UnderAnalyzed
+      InhibitedFailure:
+        type: INHIBIT
+        description: "Primary failure propagates only when the conditioning event holds."
+        inhibitCondition: "Control loop armed"
+        inputs:
+          - PrimaryFailure
+          - ConditioningEvent
+      PriorityFailure:
+        type: PRIORITY_AND
+        description: "A then B, in order."
+        inputs:
+          - EventA
+          - EventB
+    basicEvents:
+      PrimaryFailure:
+        description: "Primary component failure."
+        probability: 0.1
+      ConditioningEvent:
+        description: "Control loop is armed."
+        probability: 0.5
+      EventA:
+        description: "First event."
+        probability: 0.2
+      EventB:
+        description: "Second event."
+        probability: 0.3
+      ExternalCause:
+        description: "External environment condition."
+        eventType: house
+        probability: 0.01
+      UnderAnalyzed:
+        description: "Not yet quantified."
+        eventType: undeveloped
+        probability: 0.02
+    transfers:
+      SubAnalysis:
+        target: "#/faultTrees/OtherTree/topEvent"
+        label: "See sub-analysis"
+
+  OtherTree:
+    description: "A separate tree referenced by a transfer."
+    topEvent:
+      id: OtherFailure
+      description: "Other subsystem fails."
+      rootCause: OtherCause
+    basicEvents:
+      OtherCause:
+        description: "Root cause in the other tree."
+        probability: 0.04

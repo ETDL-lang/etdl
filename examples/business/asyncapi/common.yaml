@@ -1,0 +1,39 @@
+asyncapi: "3.0.0"
+info:
+  title: "Demo API"
+  version: "1.0.0"
+channels:
+  OutcomeChannel:
+    address: "outcome"
+    messages:
+      Success:
+        $ref: "#/components/messages/Success"
+      Failed:
+        $ref: "#/components/messages/Failed"
+  DeadLetterChannel:
+    address: "deadletter"
+    messages:
+      Failed:
+        $ref: "#/components/messages/Failed"
+components:
+  messages:
+    Event:
+      name: Event
+      payload:
+        type: object
+        properties:
+          id: { type: string }
+          ok: { type: boolean }
+    Success:
+      name: Success
+      payload:
+        type: object
+        properties:
+          id: { type: string }
+    Failed:
+      name: Failed
+      payload:
+        type: object
+        properties:
+          id: { type: string }
+          reason: { type: string }

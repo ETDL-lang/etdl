@@ -1,0 +1,69 @@
+etdl: "1.0.0"
+info:
+  title: "Notification Delivery"
+  version: "1.0.0"
+  domain: "NotificationContext"
+asyncapi_imports:
+  api: "./asyncapi/common.yaml"
+eventTrees:
+  NotificationDelivery:
+    description: "Notification Delivery."
+    initiatingEvent:
+      id: NotificationRequested
+      message: "api#/components/messages/Event"
+      next: ChannelCheck
+    nodes:
+      ChannelCheck:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.97
+            next: SendNotificationOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.03
+            next: DeliveryFailed
+      SendNotificationOperation:
+        type: operation
+        action: execute
+        handler: "send_notification_handler"
+        emits: "api#/components/messages/Success"
+        next: NotificationDeliverySucceeded
+        onFailure: DeliveryFailed
+        onFailureProbabilitySource: "#/faultTrees/DeliveryFailure/topEvent"
+        retryPolicy:
+          maxAttempts: 3
+          backoffMs: 250
+          backoffStrategy: exponential
+        timeoutMs: 5000
+      NotificationDeliverySucceeded:
+        type: consequence
+        operation: send
+        channel: "api#/channels/OutcomeChannel"
+        message: "api#/components/messages/Success"
+      DeliveryFailed:
+        type: consequence
+        operation: send
+        channel: "api#/channels/DeadLetterChannel"
+        message: "api#/components/messages/Failed"
+faultTrees:
+  DeliveryFailure:
+    description: "Notification Delivery failure."
+    topEvent:
+      id: DeliveryFailed
+      description: "Notification Delivery fails."
+      rootCause: ChannelOrProvider
+    gates:
+      ChannelOrProvider:
+        type: OR
+        inputs:
+          - ChannelDown
+          - ProviderReject
+    basicEvents:
+      ChannelDown:
+        description: "ChannelDown."
+        probability: 0.02
+      ProviderReject:
+        description: "ProviderReject."
+        probability: 0.01

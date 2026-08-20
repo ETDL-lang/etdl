@@ -1,0 +1,48 @@
+etdl: "1.0.0"
+info:
+  title: "External probability resolution"
+  version: "1.0.0"
+  domain: "PaymentsContext"
+asyncapi_imports:
+  api: "./api.yaml"
+supplements:
+  - id: etdl.reliability
+    version: "1.0"
+eventTrees:
+  PaymentProcessing:
+    initiatingEvent:
+      id: PaymentRequested
+      message: "api#/components/messages/Event"
+      next: Done
+    nodes:
+      Done:
+        type: consequence
+        operation: terminate
+faultTrees:
+  PaymentGatewayFailure:
+    topEvent:
+      id: Top
+      description: "A charge capture fails."
+      rootCause: GatewayFailure
+    gates:
+      GatewayFailure:
+        type: OR
+        inputs:
+          - GatewayTimeout
+          - GatewayUnreachable
+    basicEvents:
+      GatewayTimeout:
+        description: "Gateway did not respond in time."
+        x-reliability:
+          source: gw
+          estimate: est.timeout
+      GatewayUnreachable:
+        description: "Gateway is unreachable."
+        x-reliability:
+          source: gw
+          estimate: est.unreachable
+x-reliability:
+  sources:
+    - id: gw
+      type: external
+      file: "./artifact.rprob"

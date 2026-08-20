@@ -1,0 +1,45 @@
+etdl: "1.0.0"
+info:
+  title: "Device Monitor (future-domain-library sketch)"
+  version: "1.0.0"
+  domain: "DemoContext"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+libraries:
+  # acme.signals is NOT built-in: resolved from --library-path (see
+  # README.md in this directory). Its own `dependsOn: std.events` is
+  # followed automatically -- this document does not need to (and does
+  # not) declare std.events itself.
+  - name: acme.signals
+    version: "1.0"
+    required: true
+
+eventTrees:
+  T:
+    initiatingEvent:
+      id: I
+      message: "api#/components/messages/Request"
+      next: C
+    nodes:
+      C:
+        type: consequence
+        operation: terminate
+
+faultTrees:
+  Monitoring:
+    topEvent:
+      id: Top
+      description: "a monitoring event of interest occurred"
+      rootCause: "acme.signals.MonitoringEventOccurred"
+    basicEvents:
+      # acme.signals.MonitoringEventOccurred is OR(std.events.SignalReceived,
+      # std.events.StateChanged) -- both generic, probability-free. This
+      # document supplies the concrete probabilities two layers down.
+      std.events.SignalReceived:
+        description: "a heartbeat signal arrived from the monitored device"
+        probability: 0.3
+      std.events.StateChanged:
+        description: "the monitored device's reported state changed"
+        probability: 0.1

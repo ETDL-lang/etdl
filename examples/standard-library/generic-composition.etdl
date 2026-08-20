@@ -1,0 +1,54 @@
+# Example 1: generic event + logic composition, no reliability involved.
+#
+# This document imports std.events and std.logic together and composes a
+# generic readiness signal from them. Nothing here is about failure,
+# fault, or hazard — `std.events`/`std.logic` are domain-neutral, and this
+# example deliberately avoids the reliability supplement entirely (no
+# `supplements:` block) to prove it.
+
+etdl: "1.0.0"
+info:
+  title: "Generic Readiness Composition"
+  version: "1.0.0"
+  domain: "DemoContext"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+libraries:
+  - name: std.events
+    version: "1.0"
+  - name: std.logic
+    version: "1.0"
+
+eventTrees:
+  Readiness:
+    initiatingEvent:
+      id: CheckStarted
+      message: "api#/components/messages/CheckRequested"
+      next: Done
+    nodes:
+      Done:
+        type: consequence
+        operation: terminate
+
+faultTrees:
+  ReadinessComposition:
+    topEvent:
+      id: Top
+      description: "at least one readiness signal is present"
+      # std.logic.AnyOf is OR(SignalA, SignalB, SignalC), resolved directly
+      # as the root gate — no local wrapper gate needed. We override all
+      # three placeholder signals with concrete probabilities. Nothing
+      # about "failure" appears anywhere in this composition.
+      rootCause: "std.logic.AnyOf"
+    basicEvents:
+      std.logic.SignalA:
+        description: "a state changed (using std.events' generic StateChanged identity)"
+        probability: 0.2
+      std.logic.SignalB:
+        description: "a condition was met (using std.events' generic ConditionMet identity)"
+        probability: 0.15
+      std.logic.SignalC:
+        description: "an external signal arrived (using std.events' generic SignalReceived identity)"
+        probability: 0.05

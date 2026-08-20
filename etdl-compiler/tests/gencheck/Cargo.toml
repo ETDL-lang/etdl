@@ -1,0 +1,20 @@
+[package]
+name = "etdl-gencheck"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+# Standalone package (not part of the parent workspace) so `cargo check` here
+# resolves its own lockfile against the local path dependencies.
+[workspace]
+
+[features]
+gen-check = []
+gen-check-inline = []
+
+[dependencies]
+etdl-core = { path = "../../../etdl-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

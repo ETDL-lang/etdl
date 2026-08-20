@@ -1,0 +1,43 @@
+# Example 3: a future domain library building on std.events.
+#
+# `acme.signals` is NOT part of the ETDL Standard Library -- it is an
+# illustrative OPTIONAL library (resolved from a search path, never
+# embedded) proving the architecture supports:
+#
+#   std.events (built-in)
+#        |
+#   acme.signals (optional, `dependsOn: [{name: std.events, ...}]`)
+#        |
+#   a user document
+#
+# without this repository implementing a real "acme" domain. It composes
+# std.events' generic, probability-free identities (SignalReceived,
+# StateChanged) into one named pattern -- any device-monitoring event of
+# interest firing -- which is a plausible *device-monitoring* domain
+# concept, deliberately NOT a reliability one (no probability of failure,
+# no MTBF, no hazard rate: see docs/reference/standard-library.md's "no
+# reliability leakage" section).
+
+etdl: "1.0.0"
+
+library:
+  name: acme.signals
+  version: "1.0"
+  description: >-
+    Illustrative future domain library: composes std.events' generic
+    identities into a device-monitoring pattern. A worked example proving
+    the dependency direction (domain -> std.*), not a real product.
+  dependsOn:
+    - name: std.events
+      version: "1.0"
+
+components:
+  gates:
+    MonitoringEventOccurred:
+      type: OR
+      description: "some device-monitoring event of interest fired"
+      # References std.events' generic (probability-free) identities
+      # directly -- the same qualified-id splicing mechanism std.logic
+      # uses for its own placeholder signals resolves these transitively,
+      # regardless of which library originally declared them.
+      inputs: ["std.events.SignalReceived", "std.events.StateChanged"]

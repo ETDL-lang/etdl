@@ -1,0 +1,69 @@
+etdl: "1.0.0"
+info:
+  title: "Shipping Label Creation"
+  version: "1.0.0"
+  domain: "ShippingContext"
+asyncapi_imports:
+  api: "./asyncapi/common.yaml"
+eventTrees:
+  ShippingLabelCreation:
+    description: "Shipping Label Creation."
+    initiatingEvent:
+      id: ShipmentRequested
+      message: "api#/components/messages/Event"
+      next: AddressValidation
+    nodes:
+      AddressValidation:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.97
+            next: CreateLabelOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.03
+            next: LabelCreationFailed
+      CreateLabelOperation:
+        type: operation
+        action: execute
+        handler: "create_label_handler"
+        emits: "api#/components/messages/Success"
+        next: ShippingLabelCreationSucceeded
+        onFailure: LabelCreationFailed
+        onFailureProbabilitySource: "#/faultTrees/LabelCreationFailure/topEvent"
+        retryPolicy:
+          maxAttempts: 3
+          backoffMs: 250
+          backoffStrategy: exponential
+        timeoutMs: 5000
+      ShippingLabelCreationSucceeded:
+        type: consequence
+        operation: send
+        channel: "api#/channels/OutcomeChannel"
+        message: "api#/components/messages/Success"
+      LabelCreationFailed:
+        type: consequence
+        operation: send
+        channel: "api#/channels/DeadLetterChannel"
+        message: "api#/components/messages/Failed"
+faultTrees:
+  LabelCreationFailure:
+    description: "Shipping Label Creation failure."
+    topEvent:
+      id: LabelCreationFailed
+      description: "Shipping Label Creation fails."
+      rootCause: CarrierOrAddress
+    gates:
+      CarrierOrAddress:
+        type: OR
+        inputs:
+          - CarrierReject
+          - AddressInvalid
+    basicEvents:
+      CarrierReject:
+        description: "CarrierReject."
+        probability: 0.01
+      AddressInvalid:
+        description: "AddressInvalid."
+        probability: 0.02

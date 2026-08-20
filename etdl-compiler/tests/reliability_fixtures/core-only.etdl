@@ -1,0 +1,62 @@
+etdl: "1.0.0"
+info:
+  title: "Order Fulfillment Event Tree"
+  version: "2.0.0"
+  domain: "FulfillmentContext"
+asyncapi_imports:
+  orders_api: "./orders.yaml"
+  payment_api: "./payments.yaml"
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent:
+      id: OrderPlacedTrigger
+      message: "orders_api#/components/messages/OrderPlaced"
+      next: InventoryCheckBarrier
+    nodes:
+      InventoryCheckBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.items[*].qty > 0"
+            probability: 0.95
+            next: ProcessPaymentOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.05
+            next: OutOfStockConsequence
+      ProcessPaymentOperation:
+        type: operation
+        action: execute
+        handler: "stripe_charge_handler"
+        next: FulfillmentConsequence
+        onFailure: PaymentFailedConsequence
+        onFailureProbabilitySource: "#/faultTrees/PaymentGatewayFailure/topEvent"
+      FulfillmentConsequence:
+        type: consequence
+        operation: terminate
+      OutOfStockConsequence:
+        type: consequence
+        operation: terminate
+      PaymentFailedConsequence:
+        type: consequence
+        operation: terminate
+faultTrees:
+  PaymentGatewayFailure:
+    topEvent:
+      id: PaymentCaptureFailed
+      description: "A charge attempt against the payment gateway does not succeed."
+      rootCause: GatewayUnavailableOrRejected
+    gates:
+      GatewayUnavailableOrRejected:
+        type: OR
+        inputs:
+          - GatewayUnreachable
+          - ChargeRejected
+    basicEvents:
+      GatewayUnreachable:
+        description: "Stripe API did not respond within the configured timeout."
+        probability: 0.008
+      ChargeRejected:
+        description: "Stripe API responded with a hard decline."
+        failureRate: 0.00021
+        missionTime: 24

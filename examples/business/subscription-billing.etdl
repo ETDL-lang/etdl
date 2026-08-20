@@ -1,0 +1,69 @@
+etdl: "1.0.0"
+info:
+  title: "Subscription Billing"
+  version: "1.0.0"
+  domain: "BillingContext"
+asyncapi_imports:
+  api: "./asyncapi/common.yaml"
+eventTrees:
+  SubscriptionBilling:
+    description: "Subscription Billing."
+    initiatingEvent:
+      id: BillingRunStarted
+      message: "api#/components/messages/Event"
+      next: BillingEligibility
+    nodes:
+      BillingEligibility:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.97
+            next: ChargeSubscriptionOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.03
+            next: BillingFailed
+      ChargeSubscriptionOperation:
+        type: operation
+        action: execute
+        handler: "charge_subscription_handler"
+        emits: "api#/components/messages/Success"
+        next: SubscriptionBillingSucceeded
+        onFailure: BillingFailed
+        onFailureProbabilitySource: "#/faultTrees/BillingFailure/topEvent"
+        retryPolicy:
+          maxAttempts: 3
+          backoffMs: 250
+          backoffStrategy: exponential
+        timeoutMs: 5000
+      SubscriptionBillingSucceeded:
+        type: consequence
+        operation: send
+        channel: "api#/channels/OutcomeChannel"
+        message: "api#/components/messages/Success"
+      BillingFailed:
+        type: consequence
+        operation: send
+        channel: "api#/channels/DeadLetterChannel"
+        message: "api#/components/messages/Failed"
+faultTrees:
+  BillingFailure:
+    description: "Subscription Billing failure."
+    topEvent:
+      id: BillingFailed
+      description: "Subscription Billing fails."
+      rootCause: CardOrProcessor
+    gates:
+      CardOrProcessor:
+        type: OR
+        inputs:
+          - CardDeclined
+          - ProcessorDown
+    basicEvents:
+      CardDeclined:
+        description: "CardDeclined."
+        probability: 0.03
+      ProcessorDown:
+        description: "ProcessorDown."
+        probability: 0.008

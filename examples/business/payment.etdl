@@ -1,0 +1,80 @@
+etdl: "1.0.0"
+info:
+  title: "Payment Processing"
+  version: "1.0.0"
+  domain: "PaymentsContext"
+asyncapi_imports:
+  api: "./asyncapi/common.yaml"
+eventTrees:
+  PaymentProcessing:
+    description: "Capture a payment, compensating (refund) on failure."
+    initiatingEvent:
+      id: PaymentRequested
+      message: "api#/components/messages/Event"
+      next: ChargeBarrier
+    nodes:
+      ChargeBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.97
+            next: CapturePaymentOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.03
+            next: PaymentFailed
+      CapturePaymentOperation:
+        type: operation
+        action: execute
+        handler: "capture_charge_handler"
+        emits: "api#/components/messages/Success"
+        next: PaymentSucceeded
+        onFailure: RefundOperation
+        onFailureProbabilitySource: "#/faultTrees/CaptureFailure/topEvent"
+        retryPolicy:
+          maxAttempts: 3
+          backoffMs: 250
+          backoffStrategy: exponential
+        timeoutMs: 5000
+      RefundOperation:
+        type: operation
+        action: execute
+        handler: "refund_handler"
+        next: PaymentFailed
+        onFailure: PaymentFailed
+        retryPolicy:
+          maxAttempts: 2
+          backoffMs: 100
+          backoffStrategy: fixed
+        timeoutMs: 3000
+      PaymentSucceeded:
+        type: consequence
+        operation: send
+        channel: "api#/channels/OutcomeChannel"
+        message: "api#/components/messages/Success"
+      PaymentFailed:
+        type: consequence
+        operation: send
+        channel: "api#/channels/DeadLetterChannel"
+        message: "api#/components/messages/Failed"
+faultTrees:
+  CaptureFailure:
+    description: "The charge capture cannot complete."
+    topEvent:
+      id: CaptureFailed
+      description: "A charge capture fails."
+      rootCause: GatewayOrDecline
+    gates:
+      GatewayOrDecline:
+        type: OR
+        inputs:
+          - GatewayTimeout
+          - HardDecline
+    basicEvents:
+      GatewayTimeout:
+        description: "Gateway did not respond in time."
+        probability: 0.005
+      HardDecline:
+        description: "Gateway rejected the charge."
+        probability: 0.02

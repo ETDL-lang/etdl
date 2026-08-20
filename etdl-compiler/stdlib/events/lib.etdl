@@ -1,0 +1,94 @@
+# std.events — reusable, well-known basic-event definitions.
+#
+# This is the ETDL Standard Library's first module: a small catalog of
+# generic failure mechanisms that show up in most event-driven services, so
+# an engineer does not have to redeclare "a network call timed out" from
+# scratch in every fault tree.
+#
+# This file is ordinary ETDL — parsed by the same `etdl-parser` crate, using
+# the same `components`/`basicEvents` schema an ordinary document already
+# uses. It has no native (Rust) component: `std.events` is a source-only
+# library. See `docs/reference/standard-library.md`.
+#
+# The probabilities on the FAILURE MECHANISM entries below are illustrative
+# engineering assumptions, not measurements. If your fault tree is safety-
+# or production-critical, supply your own basic event backed by real
+# evidence (see `docs/reliability/evidence-to-estimate.md`) instead of
+# relying on these defaults for anything that matters.
+#
+# ## Two categories in this file
+#
+# "Failure mechanism" entries (NetworkTimeout, ConnectionRefused,
+# ProcessCrash, DiskFull, ConfigurationMissing) are illustrative technical
+# occurrences with a default probability attached — genuinely useful as
+# fault-tree leaves, but framed around a specific negative outcome. They
+# predate the domain-neutral guidance below and are kept unchanged: a
+# document already importing and referencing one of them must keep working
+# exactly as it did.
+#
+# "Generic identity" entries (Occurred, StateChanged, ConditionMet,
+# SignalReceived) carry NO probability, failure_rate, or mission_time —
+# only a name and a description. An event is not automatically a failure:
+# these represent bare occurrence/transition/signal identity, neutral of
+# any particular meaning. A domain layer (reliability or otherwise)
+# attaches its own likelihood by overriding the qualified id locally (the
+# standard "local declaration wins" rule — see
+# `docs/reference/standard-library.md`), exactly the same mechanism
+# `std.logic`'s placeholder signals use.
+
+etdl: "1.0.0"
+
+library:
+  name: std.events
+  version: "1.0"
+  description: >-
+    Reusable event definitions: illustrative failure-mechanism basic events
+    (network, process, storage) with default probabilities, and neutral
+    occurrence/transition/signal identities with no probability at all. An
+    event does not automatically mean failure — see the file header.
+
+components:
+  basic_events:
+    # -- Generic identity: no probability, failure_rate, or mission_time. --
+    # A bare occurrence with no implied valence (neither failure nor
+    # success). Override to give it a probability and a specific meaning.
+    Occurred:
+      description: "something happened; the specific meaning is supplied by whoever overrides this"
+
+    # A generic state transition: the system (or some entity) moved from
+    # one state to another. No assumption about whether the transition is
+    # desired or not.
+    StateChanged:
+      description: "a tracked state transitioned from one value to another"
+
+    # A generic condition becoming true. Distinct from a signal: a
+    # condition is evaluated (a predicate held), not received from outside.
+    ConditionMet:
+      description: "a declared condition evaluated true"
+
+    # A generic external signal. Distinct from a condition: a signal
+    # arrives from outside (a message, an interrupt, a notification),
+    # rather than being evaluated locally.
+    SignalReceived:
+      description: "an external signal arrived"
+
+    # -- Failure mechanisms: illustrative, probability-bearing (see header). --
+    NetworkTimeout:
+      description: "A network call did not complete within its configured timeout."
+      probability: 0.001
+
+    ConnectionRefused:
+      description: "A network call was refused because no listener accepted the connection."
+      probability: 0.0005
+
+    ProcessCrash:
+      description: "The process terminated unexpectedly (panic, segfault, or OOM kill)."
+      probability: 0.0001
+
+    DiskFull:
+      description: "A write failed because the local disk had no free space."
+      probability: 0.0002
+
+    ConfigurationMissing:
+      description: "Startup or an operation failed because required configuration was absent."
+      probability: 0.00005

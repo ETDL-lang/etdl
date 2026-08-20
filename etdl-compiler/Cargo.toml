@@ -1,0 +1,31 @@
+[package]
+name = "etdl-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "ETDL compiler: IEC 61025 fault tree resolution, MOCUS cut sets, ECEL type-checking, semantic validation, and code generation for event-driven microservices"
+keywords = ["etdl", "code-generation", "fault-tree-analysis", "reliability", "event-driven"]
+categories = ["compilers", "development-tools"]
+homepage = "https://github.com/usamassem/etdl"
+
+[features]
+default = ["reliability"]
+reliability = ["dep:etdl-reliability-core"]
+
+[dependencies]
+etdl-parser = { version = "0.3.0", path = "../etdl-parser" }
+etdl-tree-core = { version = "0.3.0", path = "../etdl-tree-core" }
+etdl-reliability-core = { version = "0.3.0", path = "../etdl-reliability-core", optional = true }
+serde.workspace = true
+serde_yaml.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "etdl_bench"
+harness = false

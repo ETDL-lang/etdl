@@ -1,0 +1,15 @@
+schema: etdl.reliability.artifact/1.0
+id: payment-gateway
+version: "1.0.0"
+estimates:
+  est.gateway-timeout:
+    event: failure.network.timeout
+    state: measured
+    value: 0.003
+    metric: probability
+    population: charge_attempt
+    time_basis: per-request
+    source: measurement
+    provenance:
+      source_type: measurement
+      dataset: production-2026-Q2

@@ -1,0 +1,69 @@
+etdl: "1.0.0"
+info:
+  title: "Customer Onboarding"
+  version: "1.0.0"
+  domain: "OnboardingContext"
+asyncapi_imports:
+  api: "./asyncapi/common.yaml"
+eventTrees:
+  CustomerOnboarding:
+    description: "Customer Onboarding."
+    initiatingEvent:
+      id: OnboardingStarted
+      message: "api#/components/messages/Event"
+      next: KycCheck
+    nodes:
+      KycCheck:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.97
+            next: ProvisionAccountOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.03
+            next: ProvisioningFailed
+      ProvisionAccountOperation:
+        type: operation
+        action: execute
+        handler: "provision_account_handler"
+        emits: "api#/components/messages/Success"
+        next: CustomerOnboardingSucceeded
+        onFailure: ProvisioningFailed
+        onFailureProbabilitySource: "#/faultTrees/ProvisioningFailure/topEvent"
+        retryPolicy:
+          maxAttempts: 3
+          backoffMs: 250
+          backoffStrategy: exponential
+        timeoutMs: 5000
+      CustomerOnboardingSucceeded:
+        type: consequence
+        operation: send
+        channel: "api#/channels/OutcomeChannel"
+        message: "api#/components/messages/Success"
+      ProvisioningFailed:
+        type: consequence
+        operation: send
+        channel: "api#/channels/DeadLetterChannel"
+        message: "api#/components/messages/Failed"
+faultTrees:
+  ProvisioningFailure:
+    description: "Customer Onboarding failure."
+    topEvent:
+      id: ProvisioningFailed
+      description: "Customer Onboarding fails."
+      rootCause: KycOrProvision
+    gates:
+      KycOrProvision:
+        type: OR
+        inputs:
+          - KycReject
+          - ProvisionTimeout
+    basicEvents:
+      KycReject:
+        description: "KycReject."
+        probability: 0.03
+      ProvisionTimeout:
+        description: "ProvisionTimeout."
+        probability: 0.01

@@ -1,0 +1,23 @@
+# The same model after the gateway timeout mitigation.
+#
+# The fix cut the timeout rate AND improved instrumentation, so this input
+# changed in two ways at once. The comparison reports both and refuses to
+# attribute the top-event change to either one alone.
+
+GatewayTimeout:
+  # 2,000 failures in 1,000,000 attempts: mean 2.0e-3.
+  law: beta
+  alpha: 2000.0
+  beta: 998000.0
+
+GatewayUnreachable:
+  law: beta
+  alpha: 2.4
+  beta: 1997.6
+
+DatabaseUnavailable:
+  law: normal-from-interval
+  lower: 0.0035
+  upper: 0.0065
+  level: 0.95
+  meaning: confidence

@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Allow a small set of stylistic lints that are noise for a 0.x codebase;
+      # real correctness lints still fail the build.
+      - run: cargo clippy --workspace --all-targets --no-deps -- \
+          -A clippy::manual_strip \
+          -A clippy::needless_range_loop \
+          -A clippy::only_used_in_recursion
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-targets
+      - run: cargo test --workspace --doc
+
+  wasm:
+    name: WASM build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - name: Build wasm
+        run: |
+          cargo build -p etdl-wasm --release --target wasm32-unknown-unknown
+          wasm-bindgen --target nodejs --out-dir /tmp/wasmout target/wasm32-unknown-unknown/release/etdl_wasm.wasm
+      - name: Smoke-test wasm exports
+        run: |
+          node -e "const m=require('/tmp/wasmout/etdl_wasm.js'); if(typeof m.validate_etdl!=='function') process.exit(1); console.log('wasm ok', m.version())"
+
+  features:
+    name: Feature matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Check all feature combinations
+        run: scripts/feature-matrix.sh --check
+
+  conformance:
+    name: Conformance suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Full conformance suite (all levels)
+        run: cargo test -p etdl-conformance --all-targets
+      - name: Lean conformance suite (no reliability feature)
+        run: cargo test -p etdl-conformance --no-default-features --all-targets
+
+  discovery:
+    name: Failure discovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run discovery tests
+        run: cargo test -p etdl-failure-discovery
+      - name: CLI discover smoke test (text)
+        run: |
+          cargo run -q -p etdl-cli -- discover etdl-failure-discovery/tests/fixtures/service --format text | grep -q "Failure Discovery Report"
+      - name: CLI discover smoke test (json)
+        run: |
+          cargo run -q -p etdl-cli -- discover etdl-failure-discovery/tests/fixtures/service --format json | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['schema']=='etdl.failure-discovery.report/1.0'; print('ok', d['statistics']['total_candidates'])"
+      - name: CLI discover min-confidence filter
+        run: |
+          cargo run -q -p etdl-cli -- discover etdl-failure-discovery/tests/fixtures/service --min-confidence 0.95 --format json | python3 -c "import json,sys; d=json.load(sys.stdin); assert all(c['confidence']>=0.95 for c in d['candidates']); print('ok')"
+      - name: Unsupported language is explicit
+        run: |
+          cargo run -q -p etdl-cli -- discover . --language python 2>&1 | grep -q "not implemented"
+
+  security:
+    name: Security audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        run: cargo audit
+
+  docs:
+    name: Docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo doc --workspace --no-deps

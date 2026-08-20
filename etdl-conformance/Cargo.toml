@@ -1,0 +1,45 @@
+[package]
+name = "etdl-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "ETDL Conformance, Verification & Validation: cross-layer conformance levels, normative test vectors, an independent mathematical reference oracle, and a machine-readable conformance manifest/report."
+keywords = ["etdl", "conformance", "verification", "validation", "reliability"]
+categories = ["development-tools::testing"]
+homepage = "https://github.com/usamassem/etdl"
+
+[features]
+# Mirrors etdl-cli's own feature shape exactly: conformance suites that
+# exercise the reliability/predictive/calibration engine (Level 3
+# reliability-family supplements, Level 4 artifact conformance) only
+# compile when that engine is present. A lean `--no-default-features`
+# conformance run still covers Level 0-2 and the Generic Tree Event
+# supplement's domain-neutral structural conformance (Level 3).
+default = ["reliability"]
+reliability = [
+    "etdl-compiler/reliability",
+    "dep:etdl-reliability-core",
+    "dep:etdl-reliability",
+]
+
+[dependencies]
+etdl-parser = { version = "0.3.0", path = "../etdl-parser" }
+# `default-features = false` + the `reliability` feature unifying
+# `etdl-compiler/reliability` below: without this, etdl-compiler's own
+# `default = ["reliability"]` would leak the reliability engine into a
+# lean build depending on this crate, exactly the accidental-dependency
+# category ARCH-004/ARCH-007 (tests/architecture.rs) exist to catch.
+etdl-compiler = { version = "0.3.0", path = "../etdl-compiler", default-features = false }
+etdl-core = { version = "0.3.0", path = "../etdl-core" }
+etdl-probability-core = { version = "0.3.0", path = "../etdl-probability-core" }
+etdl-tree-core = { version = "0.3.0", path = "../etdl-tree-core" }
+etdl-reliability-core = { version = "0.3.0", path = "../etdl-reliability-core", optional = true }
+etdl-reliability = { version = "0.3.0", path = "../etdl-reliability", optional = true }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

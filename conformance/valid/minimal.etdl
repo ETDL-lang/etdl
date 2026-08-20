@@ -1,0 +1,18 @@
+# Valid conformance fixture: minimal valid document.
+etdl: "1.0.0"
+info:
+  title: "Minimal Valid"
+  version: "1.0.0"
+  domain: "Test"
+asyncapi_imports:
+  api: "./asyncapi/api.yaml"
+eventTrees:
+  Minimal:
+    initiatingEvent:
+      id: Trigger
+      message: "api#/components/messages/Sample"
+      next: Done
+    nodes:
+      Done:
+        type: consequence
+        operation: terminate

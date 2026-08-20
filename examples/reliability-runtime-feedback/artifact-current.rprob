@@ -1,0 +1,11 @@
+schema: etdl.reliability.artifact/1.0
+id: payment-gateway
+version: "1.3.0"
+estimates:
+  failure.gateway.timeout:
+    event: failure.gateway.timeout
+    state: declared
+    value: 0.002
+    metric: probability
+    time_basis: per-request
+    conditions: []

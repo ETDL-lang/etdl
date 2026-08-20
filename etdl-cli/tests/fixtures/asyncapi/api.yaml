@@ -1,0 +1,21 @@
+asyncapi: "3.0.0"
+info:
+  title: "Advanced Fixture API"
+  version: "1.0.0"
+channels:
+  SampleChannel:
+    address: "sample"
+    messages:
+      SampleMessage:
+        $ref: "#/components/messages/Sample"
+components:
+  messages:
+    Sample:
+      name: Sample
+      title: Sample message
+      summary: A sample message
+      payload:
+        type: object
+        properties:
+          ok:
+            type: boolean

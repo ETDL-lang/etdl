@@ -1,0 +1,23 @@
+[package]
+name = "etdl-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "ETDL parser: event tree (IEC 62502) and fault tree (IEC 61025) documents, ECEL condition expressions, AsyncAPI 3.0 JSON Pointer resolution"
+keywords = ["etdl", "event-tree", "fault-tree", "iec-61025", "iec-62502"]
+categories = ["parsing", "development-tools"]
+homepage = "https://github.com/usamassem/etdl"
+
+[dependencies]
+serde.workspace = true
+serde_yaml.workspace = true
+serde_json.workspace = true
+nom.workspace = true
+thiserror.workspace = true
+saphyr = "0.0.11"
+saphyr-parser = "0.0.11"
+
+[dev-dependencies]
+proptest = "1"

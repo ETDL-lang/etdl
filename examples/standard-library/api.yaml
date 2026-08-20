@@ -1,0 +1,25 @@
+asyncapi: "3.0.0"
+info:
+  title: "Demo API"
+  version: "1.0.0"
+channels:
+  requests:
+    address: requests
+    messages:
+      CheckRequested:
+        payload:
+          type: object
+  gatewayRequests:
+    address: gatewayRequests
+    messages:
+      Request:
+        payload:
+          type: object
+components:
+  messages:
+    CheckRequested:
+      payload:
+        type: object
+    Request:
+      payload:
+        type: object

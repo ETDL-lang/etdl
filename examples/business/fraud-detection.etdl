@@ -1,0 +1,69 @@
+etdl: "1.0.0"
+info:
+  title: "Fraud Detection"
+  version: "1.0.0"
+  domain: "FraudContext"
+asyncapi_imports:
+  api: "./asyncapi/common.yaml"
+eventTrees:
+  FraudDetection:
+    description: "Fraud Detection."
+    initiatingEvent:
+      id: TransactionStarted
+      message: "api#/components/messages/Event"
+      next: RiskCheck
+    nodes:
+      RiskCheck:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.97
+            next: RunFraudModelOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.03
+            next: FraudModelFailed
+      RunFraudModelOperation:
+        type: operation
+        action: execute
+        handler: "run_fraud_model_handler"
+        emits: "api#/components/messages/Success"
+        next: FraudDetectionSucceeded
+        onFailure: FraudModelFailed
+        onFailureProbabilitySource: "#/faultTrees/FraudModelFailure/topEvent"
+        retryPolicy:
+          maxAttempts: 3
+          backoffMs: 250
+          backoffStrategy: exponential
+        timeoutMs: 5000
+      FraudDetectionSucceeded:
+        type: consequence
+        operation: send
+        channel: "api#/channels/OutcomeChannel"
+        message: "api#/components/messages/Success"
+      FraudModelFailed:
+        type: consequence
+        operation: send
+        channel: "api#/channels/DeadLetterChannel"
+        message: "api#/components/messages/Failed"
+faultTrees:
+  FraudModelFailure:
+    description: "Fraud Detection failure."
+    topEvent:
+      id: FraudModelFailed
+      description: "Fraud Detection fails."
+      rootCause: ModelOrData
+    gates:
+      ModelOrData:
+        type: OR
+        inputs:
+          - ModelTimeout
+          - DataUnavailable
+    basicEvents:
+      ModelTimeout:
+        description: "ModelTimeout."
+        probability: 0.01
+      DataUnavailable:
+        description: "DataUnavailable."
+        probability: 0.005

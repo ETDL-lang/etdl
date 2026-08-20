@@ -1,0 +1,34 @@
+# Dependency model for the payment service fault tree.
+#
+# Independence is stated explicitly. A model that says nothing is recorded as
+# `unspecified`, never silently treated as independent.
+#
+# The gateway and the database sit behind the same top-of-rack switch. That
+# shared network fabric is declared here as a common cause. It is DECLARED by
+# an engineer from incident evidence; it is never inferred from correlated
+# observations.
+independence: not-assumed
+
+common_causes:
+  - id: SharedNetworkFailure
+    ontology_id: failure.network.unreachable
+    # P(the shared fabric fails). Must not exceed the probability of any event
+    # it affects - validation rejects a common cause larger than its effects.
+    probability: 0.0002
+    affects:
+      - GatewayUnreachable
+      - DatabaseUnavailable
+    evidence:
+      - "INC-2291 post-incident review"
+      - "obs.network.tor-switch.2026-Q2"
+    source: "engineering, post-incident review INC-2291"
+    assumptions:
+      - "the payment gateway and the database replica share one top-of-rack switch"
+      - "a switch failure takes both down within the same request window"
+
+# Conditional probabilities and directed dependency edges are part of the
+# schema, but the conditioning evaluator cannot represent them. Declaring one
+# makes the analysis REFUSE with diagnostic RA001 rather than quietly return an
+# independence answer. Left empty here.
+conditional: []
+edges: []

@@ -1,0 +1,48 @@
+[package]
+name = "etdl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "ETDL CLI: compile and validate .etdl documents with IEC 61025 fault tree and IEC 62502 event tree analysis, generating Rust for microservices"
+keywords = ["etdl", "cli", "reliability", "microservices", "asyncapi"]
+categories = ["command-line-utilities", "development-tools"]
+homepage = "https://github.com/usamassem/etdl"
+
+[[bin]]
+name = "etdl"
+path = "src/main.rs"
+
+[features]
+default = ["reliability", "discovery"]
+# Built-in reliability: enable the compiler's built-in reliability extension and
+# the `etdl reliability resolve/validate/inspect/estimate/trace` commands.
+reliability = [
+    "etdl-compiler/reliability",
+    "dep:etdl-reliability-core",
+    "dep:etdl-reliability",
+    "etdl-conformance/reliability",
+]
+# Optional failure discovery: enables the `etdl discover` command.
+discovery = ["dep:etdl-failure-discovery", "dep:etdl-reliability-ontology"]
+
+[dependencies]
+etdl-parser = { version = "0.3.0", path = "../etdl-parser" }
+etdl-compiler = { version = "0.3.0", path = "../etdl-compiler", default-features = false }
+etdl-probability-core = { version = "0.3.0", path = "../etdl-probability-core" }
+etdl-tree-core = { version = "0.3.0", path = "../etdl-tree-core" }
+etdl-reliability-core = { version = "0.3.0", path = "../etdl-reliability-core", optional = true }
+etdl-reliability = { version = "0.3.0", path = "../etdl-reliability", optional = true }
+etdl-reliability-ontology = { version = "0.3.0", path = "../etdl-reliability-ontology", optional = true }
+etdl-failure-discovery = { version = "0.3.0", path = "../etdl-failure-discovery", optional = true }
+etdl-conformance = { version = "0.3.0", path = "../etdl-conformance", default-features = false }
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true

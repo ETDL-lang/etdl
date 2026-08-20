@@ -1,0 +1,22 @@
+[package]
+name = "etdl-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "ETDL runtime: BranchMonitor, retry policies, SLA anomaly detection, chaos injection, and telemetry for reliability-aware event-driven services"
+keywords = ["etdl", "reliability", "sla-monitoring", "chaos-engineering", "event-driven"]
+categories = ["development-tools", "asynchronous"]
+homepage = "https://github.com/usamassem/etdl"
+
+[dependencies]
+getrandom = "0.2"
+regex = "1"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

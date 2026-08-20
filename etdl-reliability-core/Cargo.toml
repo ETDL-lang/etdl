@@ -1,0 +1,17 @@
+[package]
+name = "etdl-reliability-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "ETDL Reliability built-in layer: deterministic probability resolution, reliability artifact reading, and validation used by the ETDL compiler (Reliability Supplement 1.0)"
+keywords = ["etdl", "reliability", "probability", "fault-tree", "builtin"]
+categories = ["science", "mathematics"]
+homepage = "https://github.com/usamassem/etdl"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true

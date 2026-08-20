@@ -1,0 +1,14 @@
+schema: etdl.reliability.observation-dataset/1.0
+id: prod-us-east-week-2
+version: "1"
+source: "gateway-service JSONL export"
+collection_period:
+  start: "2026-08-11T00:00:00Z"
+  end: "2026-08-17T23:59:59Z"
+observations:
+  - id: prod-us-east-week-2-obs-1
+    failure_mode: failure.gateway.timeout
+    exposure: 50000
+    failures: 120
+    exposure_unit: per-request
+    conditions: []

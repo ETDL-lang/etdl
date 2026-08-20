@@ -1,0 +1,69 @@
+etdl: "1.0.0"
+info:
+  title: "Banking Transaction"
+  version: "1.0.0"
+  domain: "BankingContext"
+asyncapi_imports:
+  api: "./asyncapi/common.yaml"
+eventTrees:
+  BankingTransaction:
+    description: "Banking Transaction."
+    initiatingEvent:
+      id: TransactionInitiated
+      message: "api#/components/messages/Event"
+      next: AuthCheck
+    nodes:
+      AuthCheck:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.97
+            next: PostTransactionOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.03
+            next: PostingFailed
+      PostTransactionOperation:
+        type: operation
+        action: execute
+        handler: "post_transaction_handler"
+        emits: "api#/components/messages/Success"
+        next: BankingTransactionSucceeded
+        onFailure: PostingFailed
+        onFailureProbabilitySource: "#/faultTrees/PostingFailure/topEvent"
+        retryPolicy:
+          maxAttempts: 3
+          backoffMs: 250
+          backoffStrategy: exponential
+        timeoutMs: 5000
+      BankingTransactionSucceeded:
+        type: consequence
+        operation: send
+        channel: "api#/channels/OutcomeChannel"
+        message: "api#/components/messages/Success"
+      PostingFailed:
+        type: consequence
+        operation: send
+        channel: "api#/channels/DeadLetterChannel"
+        message: "api#/components/messages/Failed"
+faultTrees:
+  PostingFailure:
+    description: "Banking Transaction failure."
+    topEvent:
+      id: PostingFailed
+      description: "Banking Transaction fails."
+      rootCause: LedgerOrAuth
+    gates:
+      LedgerOrAuth:
+        type: OR
+        inputs:
+          - LedgerUnavailable
+          - AuthFailure
+    basicEvents:
+      LedgerUnavailable:
+        description: "LedgerUnavailable."
+        probability: 0.005
+      AuthFailure:
+        description: "AuthFailure."
+        probability: 0.02

@@ -1,0 +1,51 @@
+etdl: "1.0.0"
+info:
+  title: "Payment service with external reliability"
+  version: "1.0.0"
+  domain: "PaymentsContext"
+asyncapi_imports:
+  api: "./api.yaml"
+supplements:
+  - id: etdl.reliability
+    version: "1.0"
+eventTrees:
+  PaymentProcessing:
+    initiatingEvent:
+      id: PaymentRequested
+      message: "api#/components/messages/Event"
+      next: ChargeBarrier
+    nodes:
+      ChargeBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.99
+            next: Done
+          - outcome: FAILURE
+            condition: default
+            probability: 0.01
+            next: PaymentFailed
+      Done:
+        type: consequence
+        operation: terminate
+      PaymentFailed:
+        type: consequence
+        operation: terminate
+faultTrees:
+  PaymentGatewayFailure:
+    topEvent:
+      id: PaymentCaptureFailed
+      description: "A charge capture fails."
+      rootCause: GatewayTimeout
+    basicEvents:
+      GatewayTimeout:
+        description: "Gateway did not respond in time."
+        x-reliability:
+          source: gw
+          estimate: est.gateway-timeout
+x-reliability:
+  sources:
+    - id: gw
+      type: external
+      file: "./reliability/gateway.rprob"

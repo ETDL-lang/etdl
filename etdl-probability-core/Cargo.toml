@@ -1,0 +1,16 @@
+[package]
+name = "etdl-probability-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "ETDL Standard Probability Library: domain-neutral probability types, composition math, and foundational distributions (std.probability's native layer). No dependency on any reliability crate — reliability, safety, security, and future domains consume this, not the reverse."
+keywords = ["etdl", "probability", "statistics", "distribution", "builtin"]
+categories = ["science", "mathematics"]
+homepage = "https://github.com/usamassem/etdl"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

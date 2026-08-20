@@ -1,0 +1,12 @@
+schema: etdl.reliability.artifact/1.0
+id: unknown-gateway
+version: "1.0.0"
+estimates:
+  est.a:
+    event: est.a
+    state: unknown
+    metric: probability
+  est.b:
+    event: est.b
+    state: unknown
+    metric: probability

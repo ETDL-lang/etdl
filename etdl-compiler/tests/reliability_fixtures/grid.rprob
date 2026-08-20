@@ -1,0 +1,15 @@
+schema: etdl.reliability.artifact/1.0
+id: grid
+version: "1.0.0"
+estimates:
+  est.grid:
+    event: est.grid
+    state: estimated
+    value: 0.9
+    metric: probability
+    population: regional_grid
+    time_basis: per-mission
+    source: measurement
+    provenance:
+      source_type: measurement
+      dataset: grid-reliability-2026

@@ -1,0 +1,57 @@
+# Example 1: a genuinely generic event tree — no reliability terminology.
+#
+# This document declares one tree under x-tree-event: an operational
+# monitoring scenario (an initiating signal leading to one of two follow-up
+# conditions). Nothing here is a "top event," a "failure," or a "fault" —
+# those are domain interpretations a consumer chooses to apply, not
+# anything this document asserts. See reliability-consumer.etdl for one
+# such interpretation of a similarly-shaped tree.
+
+etdl: "1.0.0"
+info:
+  title: "Generic Event Tree Demo"
+  version: "1.0.0"
+  domain: "DemoContext"
+
+supplements:
+  - id: etdl.tree-event
+    version: "1.0"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+eventTrees:
+  T:
+    initiatingEvent:
+      id: I
+      message: "api#/components/messages/Request"
+      next: C
+    nodes:
+      C:
+        type: consequence
+        operation: terminate
+
+x-tree-event:
+  trees:
+    - id: "operational-monitoring"
+      version: "1"
+      root: "AnyConditionObserved"
+      description: >-
+        InitialSignal leads to one of two follow-up conditions being
+        observed; AnyConditionObserved is true when either is. A consumer
+        may interpret this as a reliability concern, a safety trigger, or
+        neither — this tree does not say.
+      nodes:
+        ConditionA:
+          kind: leaf
+          description: "the first follow-up condition"
+          status: accepted
+        ConditionB:
+          kind: leaf
+          description: "the second follow-up condition"
+          status: candidate
+        AnyConditionObserved:
+          kind: gate
+          gate: OR
+          description: "either follow-up condition was observed"
+          children: ["ConditionA", "ConditionB"]
