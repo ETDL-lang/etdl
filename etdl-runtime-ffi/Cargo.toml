@@ -1,0 +1,29 @@
+[package]
+name = "etdl-runtime-ffi"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Stable, versioned C ABI over etdl-core: the one authoritative ETDL runtime (BranchMonitor, RetryPolicy, ECEL condition helpers) every language target (Java, Python, Go, .NET, ...) binds to. Not a per-language reimplementation."
+keywords = ["etdl", "ffi", "abi", "runtime", "interop"]
+categories = ["development-tools", "external-ffi-bindings"]
+homepage = "https://github.com/ETDL-lang/etdl"
+build = "build.rs"
+
+[lib]
+name = "etdl_runtime_ffi"
+# cdylib: the shared library (`libetdl_runtime_ffi.so`/`.dylib`/`.dll`) every
+# language binding (Java FFM, Python ctypes, Go cgo, .NET P/Invoke) loads at
+# runtime. staticlib: for a target ecosystem (e.g. Go via cgo) that prefers
+# to link the runtime in statically. rlib: so `etdl-runtime-ffi` can still be
+# used as an ordinary Rust dependency (its own tests, `etdl-cli` locating the
+# built artifact) without going through the C ABI itself.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+etdl-core = { version = "0.3.1", path = "../etdl-core" }
+serde_json.workspace = true
+
+[build-dependencies]
+cbindgen = "0.29"

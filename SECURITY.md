@@ -15,8 +15,8 @@ it parses untrusted documents (`.etdl`, AsyncAPI YAML/JSON) and generates code.
 **Do not open a public issue for a vulnerability.** Report privately to the
 maintainers via GitHub Security Advisories:
 
-- Compiler: https://github.com/usamassem/etdl/security/advisories/new
-- Specification: https://github.com/usamassem/etdl-specification/security/advisories/new
+- Compiler: https://github.com/ETDL-lang/etdl/security/advisories/new
+- Specification: https://github.com/ETDL-lang/etdl-specification/security/advisories/new
 
 Include:
 

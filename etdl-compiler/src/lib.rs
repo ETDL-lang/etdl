@@ -1,7 +1,7 @@
 //! Compiler pipeline for the Event Tree Definition Language (ETDL).
 //!
 //! Validates `.etdl` documents, resolves fault tree top-event probabilities
-//! ([IEC 61025:2006](https://github.com/usamassem/etdl-specification)), and
+//! ([IEC 61025:2006](https://github.com/ETDL-lang/etdl-specification)), and
 //! generates service-local code. Reliability — event trees (IEC 62502),
 //! fault trees (IEC 61025), retry policies, SLAs — becomes a build-time,
 //! machine-checked artifact instead of scattered runtime guesses.
@@ -46,7 +46,7 @@ pub mod tree_event;
 mod typeck;
 pub mod validate;
 
-pub use codegen::{CodeGenerator, RustCodeGenerator};
+pub use codegen::{CodeGenerator, GeneratedFile, RustCodeGenerator};
 pub use extension::{EtdlExtension, ExtensionContext, ExtensionRegistry};
 pub use validate::Diagnostic;
 
@@ -82,6 +82,34 @@ pub struct CompilationResult {
     /// feature — a document using `libraries:` gets this without needing
     /// any optional feature enabled.
     pub resolved_libraries: Vec<stdlib::LibraryProvenance>,
+}
+
+/// Result of compiling for one arbitrary target generator
+/// ([`Compiler::compile_target`]/[`Compiler::compile_target_with_base`]) —
+/// the target-neutral counterpart to [`CompilationResult`], which stays
+/// Rust-specific (`rust_output: Option<String>`) for backward compatibility.
+#[derive(Debug, Clone)]
+pub struct TargetCompilationResult {
+    pub diagnostics: Vec<Diagnostic>,
+    /// The generated files, present iff generation succeeded with no
+    /// upstream errors. Empty output (a generator returning zero files) is
+    /// treated the same as `None`, matching `CompilationResult::rust_output`.
+    pub files: Option<Vec<codegen::GeneratedFile>>,
+    pub build_manifest: Option<serde_json::Value>,
+    pub resolved_libraries: Vec<stdlib::LibraryProvenance>,
+}
+
+/// The target-neutral part of the pipeline (library expansion, validation,
+/// extension processing, fault-tree probability resolution) — computed once
+/// and shared by every target's compilation, so no target implementation
+/// (Rust or otherwise) re-runs parsing, semantic validation, or fault-tree
+/// evaluation. See `docs/architecture/targets.md`.
+struct Prepared {
+    expanded_doc: EtlDocument,
+    fault_tree_probs: std::collections::BTreeMap<String, f64>,
+    diagnostics: Vec<Diagnostic>,
+    build_manifest: Option<serde_json::Value>,
+    resolved_libraries: Vec<stdlib::LibraryProvenance>,
 }
 
 impl Compiler {
@@ -203,23 +231,119 @@ impl Compiler {
         asyncapi_registry: &AsyncApiRegistry,
         base_dir: &std::path::Path,
     ) -> CompilationResult {
-        // Resolve `libraries:` once here; `validate_with_base` also expands
-        // (idempotently, from the already-expanded document) since it is a
-        // public entry point in its own right and must not require callers
-        // to pre-expand.
+        let prepared = self.prepare(doc, asyncapi_registry, base_dir);
+        if prepared.diagnostics.iter().any(|d| d.is_error()) {
+            return CompilationResult {
+                diagnostics: prepared.diagnostics,
+                rust_output: None,
+                build_manifest: prepared.build_manifest,
+                resolved_libraries: prepared.resolved_libraries,
+            };
+        }
+
+        let mut diagnostics = prepared.diagnostics;
+        // "generated" is a placeholder stem: compile_with_base predates
+        // per-file naming (callers only ever read `rust_output`'s string
+        // content, never a filename derived from it), so nothing observes
+        // this value — it exists only to satisfy generate_all's signature,
+        // which every target (not just this one) now takes a stem through.
+        let gen_result = self.rust_codegen.generate_all(
+            &prepared.expanded_doc,
+            &prepared.fault_tree_probs,
+            asyncapi_registry,
+            "generated",
+            &mut diagnostics,
+        );
+        let rust_output = gen_result
+            .ok()
+            .and_then(|files| files.into_iter().next())
+            .map(|f| f.contents)
+            .filter(|s| !s.is_empty());
+
+        CompilationResult {
+            diagnostics,
+            rust_output,
+            build_manifest: prepared.build_manifest,
+            resolved_libraries: prepared.resolved_libraries,
+        }
+    }
+
+    /// Compile for an arbitrary registered target (see `etdl-cli`'s target
+    /// registry) rather than the built-in Rust target specifically. `stem`
+    /// is the input document's filename without extension, used for output
+    /// naming exactly like `compile_with_base`'s Rust path already does.
+    pub fn compile_target(
+        &self,
+        doc: &EtlDocument,
+        asyncapi_registry: &AsyncApiRegistry,
+        generator: &dyn CodeGenerator,
+        stem: &str,
+    ) -> TargetCompilationResult {
+        self.compile_target_with_base(doc, asyncapi_registry, std::path::Path::new("."), generator, stem)
+    }
+
+    /// [`Compiler::compile_target`] with a base directory for resolving
+    /// relative reliability artifact paths.
+    pub fn compile_target_with_base(
+        &self,
+        doc: &EtlDocument,
+        asyncapi_registry: &AsyncApiRegistry,
+        base_dir: &std::path::Path,
+        generator: &dyn CodeGenerator,
+        stem: &str,
+    ) -> TargetCompilationResult {
+        let prepared = self.prepare(doc, asyncapi_registry, base_dir);
+        if prepared.diagnostics.iter().any(|d| d.is_error()) {
+            return TargetCompilationResult {
+                diagnostics: prepared.diagnostics,
+                files: None,
+                build_manifest: prepared.build_manifest,
+                resolved_libraries: prepared.resolved_libraries,
+            };
+        }
+
+        let mut diagnostics = prepared.diagnostics;
+        let gen_result = generator.generate_all(
+            &prepared.expanded_doc,
+            &prepared.fault_tree_probs,
+            asyncapi_registry,
+            stem,
+            &mut diagnostics,
+        );
+        let files = gen_result.ok().filter(|files| !files.is_empty());
+
+        TargetCompilationResult {
+            diagnostics,
+            files,
+            build_manifest: prepared.build_manifest,
+            resolved_libraries: prepared.resolved_libraries,
+        }
+    }
+
+    /// Shared pipeline for every target: library expansion, validation,
+    /// extension processing, fault-tree probability resolution. Faithfully
+    /// mirrors what `compile_with_base` always did inline (including
+    /// `validate_with_base`'s own idempotent re-expansion of `libraries:` —
+    /// see its doc comment) — extracted here, unchanged, so a second target
+    /// can share it instead of duplicating it.
+    fn prepare(
+        &self,
+        doc: &EtlDocument,
+        asyncapi_registry: &AsyncApiRegistry,
+        base_dir: &std::path::Path,
+    ) -> Prepared {
         let (expanded_doc, resolved_libs, _lib_errors) =
             stdlib::expand_libraries(doc, base_dir, &self.library_resolver);
-        let doc = &expanded_doc;
         let resolved_libraries: Vec<stdlib::LibraryProvenance> =
             resolved_libs.iter().map(|l| l.provenance()).collect();
 
-        let mut diagnostics = self.validate_with_base(doc, asyncapi_registry, base_dir);
-
+        let mut diagnostics = self.validate_with_base(&expanded_doc, asyncapi_registry, base_dir);
         let has_errors = diagnostics.iter().any(|d| d.is_error());
         if has_errors {
-            return CompilationResult {
+            return Prepared {
+                expanded_doc,
+                fault_tree_probs: std::collections::BTreeMap::new(),
                 diagnostics,
-                rust_output: None,
                 build_manifest: None,
                 resolved_libraries,
             };
@@ -228,32 +352,18 @@ impl Compiler {
         // Extensions: resolve external probability sources to deterministic
         // scalars BEFORE fault-tree evaluation. Preserves the build-time
         // resolution model; nothing is resolved at runtime.
-        let (overrides, manifest) = self.run_extensions(doc, base_dir, &mut diagnostics);
-
+        let (overrides, manifest) = self.run_extensions(&expanded_doc, base_dir, &mut diagnostics);
         let build_manifest = manifest.as_ref().and_then(|m| serde_json::to_value(m).ok());
-
-        let fault_tree_probs =
-            fault_tree::resolve_fault_trees_with_overrides(doc, &overrides, &mut diagnostics);
-
-        let mut rust_output = String::new();
-        let gen_result = self.rust_codegen.generate_all(
-            doc,
-            &fault_tree_probs,
-            asyncapi_registry,
+        let fault_tree_probs = fault_tree::resolve_fault_trees_with_overrides(
+            &expanded_doc,
+            &overrides,
             &mut diagnostics,
         );
 
-        if let Ok(gen_code) = gen_result {
-            rust_output = gen_code;
-        }
-
-        CompilationResult {
+        Prepared {
+            expanded_doc,
+            fault_tree_probs,
             diagnostics,
-            rust_output: if rust_output.is_empty() {
-                None
-            } else {
-                Some(rust_output)
-            },
             build_manifest,
             resolved_libraries,
         }

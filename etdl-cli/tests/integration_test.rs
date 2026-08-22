@@ -727,4 +727,204 @@ faultTrees:
         assert_eq!(out.status.code(), Some(0));
         assert!(stdout.contains("etdl "));
     }
+
+    // --- `--target` selection (spec: "--target as a first-class
+    // extensibility mechanism") ---
+
+    fn temp_out_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "etdl_cli_target_{}_{}",
+            name,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn cli_compile_default_target_is_rust() {
+        let out_dir = temp_out_dir("default");
+        let (out, _) = run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out_dir.join("order-fulfillment.rs").exists());
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[test]
+    fn cli_compile_explicit_rust_matches_default_output() {
+        let default_dir = temp_out_dir("explicit_rust_default");
+        let explicit_dir = temp_out_dir("explicit_rust_explicit");
+        run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--out-dir",
+            default_dir.to_str().unwrap(),
+        ]);
+        run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--target",
+            "rust",
+            "--out-dir",
+            explicit_dir.to_str().unwrap(),
+        ]);
+        let default_src = std::fs::read_to_string(default_dir.join("order-fulfillment.rs")).unwrap();
+        let explicit_src = std::fs::read_to_string(explicit_dir.join("order-fulfillment.rs")).unwrap();
+        assert_eq!(default_src, explicit_src, "bare `compile` and `--target rust` must produce byte-identical output");
+        let _ = std::fs::remove_dir_all(&default_dir);
+        let _ = std::fs::remove_dir_all(&explicit_dir);
+    }
+
+    #[test]
+    fn cli_compile_unknown_target_fails_with_a_clear_error() {
+        let out_dir = temp_out_dir("unknown");
+        let (out, _) = run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--target",
+            "cobol",
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("unsupported target 'cobol'"), "got: {stderr}");
+        assert!(stderr.contains("available targets:"), "got: {stderr}");
+        assert!(!out_dir.exists(), "unknown target must fail before writing anything");
+    }
+
+    #[test]
+    fn cli_compile_help_lists_available_targets() {
+        let (out, stdout) = run_cli(&["compile", "--help"]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(stdout.contains("Available in this build:"), "got: {stdout}");
+        assert!(stdout.contains("rust"), "got: {stdout}");
+    }
+
+    #[cfg(feature = "target-java")]
+    #[test]
+    fn cli_compile_target_java_generates_a_compilable_package() {
+        let out_dir = temp_out_dir("java");
+        let (out, stdout) = run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--target",
+            "java",
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(stdout.contains("target 'java'"), "got: {stdout}");
+        assert!(out_dir.join("etdl/runtime/WorkflowError.java").exists());
+        assert!(out_dir.join("fulfillmentcontext/OrderFulfillmentWorkflow.java").exists());
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[cfg(feature = "target-python")]
+    #[test]
+    fn cli_compile_target_python_generates_expected_modules() {
+        let out_dir = temp_out_dir("python");
+        let (out, stdout) = run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--target",
+            "python",
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(stdout.contains("target 'python'"), "got: {stdout}");
+        assert!(out_dir.join("etdl/runtime/branch_monitor.py").exists());
+        assert!(out_dir.join("fulfillment_context/workflow.py").exists());
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[cfg(feature = "target-go")]
+    #[test]
+    fn cli_compile_target_go_generates_expected_module() {
+        let out_dir = temp_out_dir("go");
+        let (out, stdout) = run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--target",
+            "go",
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(stdout.contains("target 'go'"), "got: {stdout}");
+        assert!(out_dir.join("go.mod").exists());
+        assert!(out_dir.join("etdl/runtime/branch_monitor.go").exists());
+        assert!(out_dir.join("fulfillmentcontext/workflow.go").exists());
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[cfg(feature = "target-dotnet")]
+    #[test]
+    fn cli_compile_target_dotnet_generates_expected_project() {
+        let out_dir = temp_out_dir("dotnet");
+        let (out, stdout) = run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--target",
+            "dotnet",
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(stdout.contains("target 'dotnet'"), "got: {stdout}");
+        assert!(out_dir.join("OrderFulfillment.csproj").exists());
+        assert!(out_dir.join("Etdl/Runtime/BranchMonitor.cs").exists());
+        assert!(out_dir.join("FulfillmentContext/OrderFulfillmentWorkflow.cs").exists());
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[cfg(feature = "target-java")]
+    #[test]
+    fn cli_compile_multi_target_writes_both_outputs() {
+        let out_dir = temp_out_dir("multi");
+        let (out, _) = run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--target",
+            "rust,java",
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out_dir.join("order-fulfillment.rs").exists());
+        assert!(out_dir.join("fulfillmentcontext/OrderFulfillmentWorkflow.java").exists());
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    #[cfg(all(
+        feature = "target-java",
+        feature = "target-python",
+        feature = "target-go",
+        feature = "target-dotnet"
+    ))]
+    #[test]
+    fn cli_compile_all_five_targets_in_one_invocation() {
+        let out_dir = temp_out_dir("all_five");
+        let (out, _) = run_cli(&[
+            "compile",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "--target",
+            "rust,java,python,go,dotnet",
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0));
+        assert!(out_dir.join("order-fulfillment.rs").exists());
+        assert!(out_dir.join("fulfillmentcontext/OrderFulfillmentWorkflow.java").exists());
+        assert!(out_dir.join("fulfillment_context/workflow.py").exists());
+        assert!(out_dir.join("fulfillmentcontext/workflow.go").exists());
+        assert!(out_dir.join("FulfillmentContext/OrderFulfillmentWorkflow.cs").exists());
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
 }

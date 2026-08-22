@@ -1,8 +1,8 @@
 # ETDL Current Readiness Audit
 
-**Repository:** `github.com/usamassem/etdl` (compiler, v0.2.0)
-**Specification:** `github.com/usamassem/etdl-specification` (ETDL 1.0.0)
-**Extension:** `github.com/usamassem/etdl-vscode` (0.2.0)
+**Repository:** `github.com/ETDL-lang/etdl` (compiler, v0.2.0)
+**Specification:** `github.com/ETDL-lang/etdl-specification` (ETDL 1.0.0)
+**Extension:** `github.com/ETDL-lang/etdl-vscode` (0.2.0)
 **Audit date:** 2026-08-13
 
 > **2026-08-19 update:** all four §3 P0 blockers below (P0-A/B/C/D) were
@@ -28,7 +28,7 @@ Severity: **P0** = blocker, **P1** = important, **P2** = improvement,
 
 ## 1. What changed since the previous review
 
-### Compiler repo (`usamassem/etdl`) — history 3c0cac3 → 49eb0db
+### Compiler repo (`ETDL-lang/etdl`) — history 3c0cac3 → 49eb0db
 The previous readiness phases (Phases 1–11) landed, plus:
 
 | Change | Evidence | Verified? |
@@ -53,7 +53,7 @@ The previous readiness phases (Phases 1–11) landed, plus:
 **Workspace version:** 0.2.0 (`Cargo.toml:21`). **Tests:** 101 passing across
 the workspace (`cargo test --workspace --tests`).
 
-### Spec repo (`usamassem/etdl-specification`) — history f3dbef0 → 01b5766
+### Spec repo (`ETDL-lang/etdl-specification`) — history f3dbef0 → 01b5766
 - Appendices A–E added directly to `ETDL-Specification.md` (grammar, diagnostic
   registry, reserved words, changelog, JSON Schema reference).
 - New `schemas/etdl.schema.json` companion artifact.
@@ -62,7 +62,7 @@ the workspace (`cargo test --workspace --tests`).
   (V-505/V-506/W-405/W-406).
 - `SPEC_GAPS_ADDENDUM.md` removed (changes applied directly).
 
-### Extension repo (`usamassem/etdl-vscode`) — history b447029 → e31681d
+### Extension repo (`ETDL-lang/etdl-vscode`) — history b447029 → e31681d
 - WASM LSP endpoints wired into native providers (`src/lsp.ts`).
 - WASM `pkg/` synced to 0.2.0; `repository.url` fixed; README/config updated.
 - `docs/raaml-compiler-gaps.md` removed.

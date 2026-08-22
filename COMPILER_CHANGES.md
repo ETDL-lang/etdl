@@ -127,7 +127,7 @@ Each returns a JSON payload modeled on the LSP types. These are **optional** —
 
 ## Reference material
 
-- Compiler repo: `https://github.com/usamassem/etdl.git` (build via `scripts/build-wasm.sh` in the extension repo).
+- Compiler repo: `https://github.com/ETDL-lang/etdl.git` (build via `scripts/build-wasm.sh` in the extension repo).
 - Current extension consumption: `src/etdlWasm.ts` (`validate_etdl`, `parse_for_diagram`, `parse_for_raaml`, `version`), `src/etdlParser.ts` (client-side scanner), `src/server/*` (LSP handlers).
 
 ## Compatibility notes

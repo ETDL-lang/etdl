@@ -4,6 +4,11 @@ members = [
     "etdl-parser",
     "etdl-compiler",
     "etdl-core",
+    "etdl-runtime-ffi",
+    "etdl-target-java",
+    "etdl-target-python",
+    "etdl-target-dotnet",
+    "etdl-target-go",
     "etdl-cli",
     "etdl-wasm",
     "etdl-probability-core",
@@ -19,12 +24,15 @@ members = [
 # `etdl-compiler/tests/codegen_test.rs`; excluded from normal builds.
 exclude = ["etdl-compiler/tests/gencheck"]
 
+# No shared `version`/`readme` here: every crate now versions and
+# documents itself independently (each has its own README.md and an
+# explicit `version` in its own Cargo.toml) rather than inheriting one
+# workspace-wide value — see each crate's own README for what changed and
+# why.
 [workspace.package]
-version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/usamassem/etdl"
-readme = "README.md"
+repository = "https://github.com/ETDL-lang/etdl"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

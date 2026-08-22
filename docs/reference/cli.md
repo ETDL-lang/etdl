@@ -70,4 +70,4 @@ The compiler reports three severity classes:
 | `V-1xx`–`V-5xx` | Semantic validation errors — bad probabilities, type errors, gate cycles, undefined handlers, invalid references |
 | `W-4xx` | Warnings — suspicious but non-fatal patterns |
 
-Full diagnostic codes are enumerated in the [specification](https://github.com/usamassem/etdl-specification).
+Full diagnostic codes are enumerated in the [specification](https://github.com/ETDL-lang/etdl-specification).

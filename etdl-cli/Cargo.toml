@@ -1,21 +1,21 @@
 [package]
 name = "etdl-cli"
-version.workspace = true
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-readme.workspace = true
-description = "ETDL CLI: compile and validate .etdl documents with IEC 61025 fault tree and IEC 62502 event tree analysis, generating Rust for microservices"
+readme = "README.md"
+description = "ETDL CLI: compile and validate .etdl documents with IEC 61025 fault tree and IEC 62502 event tree analysis; generates a native Rust runtime (default) plus optional thin language bindings (--target java/python/go/dotnet) for microservices"
 keywords = ["etdl", "cli", "reliability", "microservices", "asyncapi"]
 categories = ["command-line-utilities", "development-tools"]
-homepage = "https://github.com/usamassem/etdl"
+homepage = "https://github.com/ETDL-lang/etdl"
 
 [[bin]]
 name = "etdl"
 path = "src/main.rs"
 
 [features]
-default = ["reliability", "discovery"]
+default = ["reliability", "discovery", "target-java", "target-python", "target-go", "target-dotnet"]
 # Built-in reliability: enable the compiler's built-in reliability extension and
 # the `etdl reliability resolve/validate/inspect/estimate/trace` commands.
 reliability = [
@@ -26,17 +26,35 @@ reliability = [
 ]
 # Optional failure discovery: enables the `etdl discover` command.
 discovery = ["dep:etdl-failure-discovery", "dep:etdl-reliability-ontology"]
+# Every `target-*` feature below gates a thin, pure-Rust code-generation
+# crate that binds the *generated* output to etdl-runtime-ffi's C ABI in
+# that language's own idiomatic way (java.lang.foreign, ctypes, cgo,
+# P/Invoke) — see docs/architecture/targets.md. None of them need their
+# language's own toolchain *installed on this machine* merely to build
+# etdl-cli; that toolchain (plus a built etdl-runtime-ffi) is needed only
+# to build/run the *generated* Java/Python/Go/C# output. All four stay
+# default-on for exactly that reason. Disable with `--no-default-features
+# --features reliability,discovery` for a build that advertises only the
+# always-available `rust` target.
+target-java = ["dep:etdl-target-java"]
+target-python = ["dep:etdl-target-python"]
+target-go = ["dep:etdl-target-go"]
+target-dotnet = ["dep:etdl-target-dotnet"]
 
 [dependencies]
-etdl-parser = { version = "0.3.0", path = "../etdl-parser" }
-etdl-compiler = { version = "0.3.0", path = "../etdl-compiler", default-features = false }
-etdl-probability-core = { version = "0.3.0", path = "../etdl-probability-core" }
-etdl-tree-core = { version = "0.3.0", path = "../etdl-tree-core" }
-etdl-reliability-core = { version = "0.3.0", path = "../etdl-reliability-core", optional = true }
-etdl-reliability = { version = "0.3.0", path = "../etdl-reliability", optional = true }
-etdl-reliability-ontology = { version = "0.3.0", path = "../etdl-reliability-ontology", optional = true }
-etdl-failure-discovery = { version = "0.3.0", path = "../etdl-failure-discovery", optional = true }
-etdl-conformance = { version = "0.3.0", path = "../etdl-conformance", default-features = false }
+etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
+etdl-compiler = { version = "0.3.1", path = "../etdl-compiler", default-features = false }
+etdl-target-java = { version = "0.0.1", path = "../etdl-target-java", optional = true }
+etdl-target-python = { version = "0.0.1", path = "../etdl-target-python", optional = true }
+etdl-target-go = { version = "0.0.1", path = "../etdl-target-go", optional = true }
+etdl-target-dotnet = { version = "0.0.1", path = "../etdl-target-dotnet", optional = true }
+etdl-probability-core = { version = "0.3.1", path = "../etdl-probability-core" }
+etdl-tree-core = { version = "0.3.1", path = "../etdl-tree-core" }
+etdl-reliability-core = { version = "0.3.1", path = "../etdl-reliability-core", optional = true }
+etdl-reliability = { version = "0.3.1", path = "../etdl-reliability", optional = true }
+etdl-reliability-ontology = { version = "0.3.1", path = "../etdl-reliability-ontology", optional = true }
+etdl-failure-discovery = { version = "0.3.1", path = "../etdl-failure-discovery", optional = true }
+etdl-conformance = { version = "0.3.1", path = "../etdl-conformance", default-features = false }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true

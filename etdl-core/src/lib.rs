@@ -1,7 +1,7 @@
 //! Runtime library for code generated from Event Tree Definition Language
 //! (ETDL) documents — the reliability-aware, event-driven DSL based on
-//! [IEC 62502](https://github.com/usamassem/etdl-specification) event tree and
-//! [IEC 61025](https://github.com/usamassem/etdl-specification) fault tree analysis.
+//! [IEC 62502](https://github.com/ETDL-lang/etdl-specification) event tree and
+//! [IEC 61025](https://github.com/ETDL-lang/etdl-specification) fault tree analysis.
 //!
 //! Generated handlers use these components to record branches and failures
 //! against build-time-resolved probabilities, enforce declared retry policies,

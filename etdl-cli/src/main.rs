@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
+mod targets;
+
 #[derive(Parser)]
 #[command(
     name = "etdl",
@@ -36,7 +38,9 @@ enum Command {
         #[arg(
             long,
             default_value = "rust",
-            help = "Target language for code generation"
+            help = "Target language(s) for code generation: comma-separated, e.g. \
+                    'rust,java'. `rust` is always available; run with `--help` to \
+                    see every target this build actually has enabled."
         )]
         target: String,
 
@@ -334,12 +338,31 @@ enum ReliabilityCommand {
 }
 
 fn main() {
+    // `--target`'s help text lists only targets this build actually has
+    // enabled (spec: "Only list targets that are actually
+    // enabled/installed"), so it's assembled at startup from the same
+    // registry `cmd_compile` dispatches through, rather than hardcoded.
+    let available = targets::available_target_names().join(", ");
+    let target_help = format!(
+        "Target language(s) for code generation: comma-separated, e.g. \
+         'rust,java'. Available in this build: {available}"
+    );
+    let cli_command = {
+        use clap::CommandFactory;
+        Cli::command().mut_subcommand("compile", |cmd| {
+            cmd.mut_arg("target", |arg| arg.help(target_help))
+        })
+    };
+    let matches = cli_command.get_matches();
     let Cli {
         json,
         quiet,
         verbose,
         command,
-    } = Cli::parse();
+    } = {
+        use clap::FromArgMatches;
+        Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+    };
 
     let flags = CliFlags {
         json,
@@ -753,6 +776,18 @@ fn print_diagnostics(flags: &CliFlags, diagnostics: &[etdl_compiler::validate::D
     }
 }
 
+/// Dispatches to every target named in `--target` (comma-separated; a bare
+/// `compile` defaults `target` to `"rust"` at the `clap` level, so this
+/// always sees at least one name). Unknown target names fail fast, before
+/// the file is even read, exactly like the old hardcoded `target != "rust"`
+/// check did — so `etdl compile x.etdl --target bogus` still costs nothing.
+///
+/// A single `--target rust` (or the default, which is the same thing)
+/// produces byte-identical output to every prior release: `compile_with_base`
+/// and `compile_target_with_base` now share the same `prepare()` pipeline
+/// (see `etdl-compiler/src/lib.rs`), and `RustCodeGenerator::generate_all`'s
+/// actual generation logic is untouched — only its signature grew a `stem`
+/// parameter it already always would have used for the output filename.
 fn cmd_compile(
     flags: &CliFlags,
     file: &Path,
@@ -760,12 +795,25 @@ fn cmd_compile(
     out_dir: &Path,
     library_path: &[PathBuf],
 ) -> i32 {
-    if target != "rust" {
-        eprintln!(
-            "error: unsupported target language '{}'; supported: rust",
-            target
-        );
-        return 1;
+    let target_names = targets::split_target_names(target);
+    if target_names.is_empty() {
+        eprintln!("error: --target requires at least one target name");
+        return 2;
+    }
+
+    let mut generators = Vec::with_capacity(target_names.len());
+    for name in &target_names {
+        match targets::resolve_target(name) {
+            Some(g) => generators.push(g),
+            None => {
+                eprintln!(
+                    "error: unsupported target '{}'; available targets: {}",
+                    name,
+                    targets::available_target_names().join(", ")
+                );
+                return 1;
+            }
+        }
     }
 
     let content = match std::fs::read_to_string(file) {
@@ -799,40 +847,92 @@ fn cmd_compile(
         .fold(etdl_compiler::Compiler::new(), |c, p| {
             c.with_library_search_path(p.clone())
         });
-    let base_dir = file.parent().unwrap_or(Path::new("."));
-    let mut result = compiler.compile_with_base(&doc, &registry, base_dir);
 
-    append_duplicate_warnings(&mut result.diagnostics, &content);
-    resolve_diagnostic_positions(&mut result.diagnostics, &content);
+    let stem = file
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
 
-    let error_count = result.diagnostics.iter().filter(|d| d.is_error()).count();
-    let warning_count = result.diagnostics.iter().filter(|d| !d.is_error()).count();
+    let multi_target = target_names.len() > 1;
+    let mut any_errors = false;
+    let mut wrote_manifests = false;
 
-    print_diagnostics(flags, &result.diagnostics);
+    for (name, generator) in target_names.iter().copied().zip(generators.into_iter()) {
+        let mut result =
+            compiler.compile_target_with_base(&doc, &registry, base_dir, generator.as_ref(), &stem);
 
-    match result.rust_output {
-        Some(output) => {
-            let stem = file.file_stem().unwrap_or_default().to_string_lossy();
-            let out_path = out_dir.join(format!("{}.rs", stem));
+        append_duplicate_warnings(&mut result.diagnostics, &content);
+        resolve_diagnostic_positions(&mut result.diagnostics, &content);
 
-            if !out_dir.exists() {
-                if let Err(e) = std::fs::create_dir_all(out_dir) {
-                    eprintln!("error: cannot create output directory: {}", e);
-                    return 1;
+        let error_count = result.diagnostics.iter().filter(|d| d.is_error()).count();
+        let warning_count = result.diagnostics.iter().filter(|d| !d.is_error()).count();
+
+        if multi_target && !flags.quiet {
+            eprintln!("--- target: {} ---", name);
+        }
+        print_diagnostics(flags, &result.diagnostics);
+
+        let Some(files) = result.files else {
+            any_errors = true;
+            if !flags.quiet {
+                eprintln!(
+                    "compilation failed for target '{}' with {} errors and {} warnings",
+                    name, error_count, warning_count
+                );
+            }
+            continue;
+        };
+
+        if !out_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(out_dir) {
+                eprintln!("error: cannot create output directory: {}", e);
+                return 1;
+            }
+        }
+
+        // Each target's `GeneratedFile::relative_path` already encodes that
+        // target's own output-structure convention (Rust: a single flat
+        // `<stem>.rs`; Java: a package/directory layout under
+        // `etdl/runtime/` and `<package>/`) — writing here never
+        // special-cases a target's layout, just follows whatever paths it
+        // returned.
+        let mut write_failed = false;
+        for gf in &files {
+            let out_path = out_dir.join(&gf.relative_path);
+            if let Some(parent) = out_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!(
+                        "error: cannot create output directory {}: {}",
+                        parent.display(),
+                        e
+                    );
+                    write_failed = true;
+                    break;
                 }
             }
-
-            if let Err(e) = std::fs::write(&out_path, output) {
+            if let Err(e) = std::fs::write(&out_path, &gf.contents) {
                 eprintln!(
                     "error: cannot write generated code to {}: {}",
                     out_path.display(),
                     e
                 );
-                return 1;
+                write_failed = true;
+                break;
             }
+        }
+        if write_failed {
+            any_errors = true;
+            continue;
+        }
 
-            // If a reliability build manifest was produced, write it next to
-            // the generated code for reproducibility (provenance).
+        // Target-independent: produced once by the shared `prepare()`
+        // pipeline before any target generator ever runs, so every target's
+        // `build_manifest`/`resolved_libraries` for this invocation are
+        // identical — write them only for the first target that succeeds.
+        if !wrote_manifests {
+            wrote_manifests = true;
+
             if let Some(manifest) = &result.build_manifest {
                 let manifest_path = out_dir.join("etdl-build-manifest.json");
                 if let Ok(json) = serde_json::to_string_pretty(manifest) {
@@ -877,8 +977,14 @@ fn cmd_compile(
                     }
                 }
             }
+        }
 
-            if !flags.quiet {
+        if !flags.quiet {
+            if !multi_target && name == "rust" {
+                // Byte-for-byte the same summary line every prior release
+                // printed for the (still overwhelmingly common) single
+                // implicit/explicit `rust` case.
+                let out_path = out_dir.join(format!("{stem}.rs"));
                 println!(
                     "compiled '{}' to '{}' ({} errors, {} warnings)",
                     file.display(),
@@ -886,18 +992,24 @@ fn cmd_compile(
                     error_count,
                     warning_count
                 );
-            }
-            0
-        }
-        None => {
-            if !flags.quiet {
-                eprintln!(
-                    "compilation failed with {} errors and {} warnings",
-                    error_count, warning_count
+            } else {
+                println!(
+                    "compiled '{}' to target '{}': {} file(s) written to '{}' ({} errors, {} warnings)",
+                    file.display(),
+                    name,
+                    files.len(),
+                    out_dir.display(),
+                    error_count,
+                    warning_count
                 );
             }
-            1
         }
+    }
+
+    if any_errors {
+        1
+    } else {
+        0
     }
 }
 

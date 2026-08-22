@@ -1,0 +1,33 @@
+asyncapi: "3.0.0"
+info:
+  title: Payments API
+  version: "1.0.0"
+components:
+  messages:
+    PaymentProcessed:
+      payload:
+        type: object
+        properties:
+          transactionId:
+            type: string
+          amount:
+            type: number
+    PaymentFailed:
+      payload:
+        type: object
+        properties:
+          orderId:
+            type: string
+          errorCode:
+            type: string
+    GatewayTimeout:
+      payload:
+        type: object
+        properties:
+          gateway:
+            type: string
+          timeoutMs:
+            type: integer
+channels:
+  PaymentChannel:
+    address: "payments.capture"

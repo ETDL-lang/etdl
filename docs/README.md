@@ -38,10 +38,10 @@ ETDL is a declarative, design-time domain-specific language (DSL) for **reliabil
 - [Readiness Backlog](READINESS_BACKLOG.md) — prioritized P0–P3 findings
 - [Readiness Scorecard](READINESS_SCORECARD.md) — current scores with evidence
 - [Spec × Implementation Matrix](SPEC_IMPLEMENTATION_MATRIX.md) — normative mapping
-- [Specification](https://github.com/usamassem/etdl-specification) — the formal spec (v1.0.0, CC BY 4.0)
+- [Specification](https://github.com/ETDL-lang/etdl-specification) — the formal spec (v1.0.0, CC BY 4.0)
 
 ## Getting help
 
-- Open an issue on [github.com/usamassem/etdl](https://github.com/usamassem/etdl)
-- Chat about the specification at [github.com/usamassem/etdl-specification](https://github.com/usamassem/etdl-specification)
+- Open an issue on [github.com/ETDL-lang/etdl](https://github.com/ETDL-lang/etdl)
+- Chat about the specification at [github.com/ETDL-lang/etdl-specification](https://github.com/ETDL-lang/etdl-specification)
 - Report a vulnerability per [SECURITY.md](../SECURITY.md)

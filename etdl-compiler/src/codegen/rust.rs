@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::validate::Diagnostic;
 
-use super::CodeGenerator;
+use super::{CodeGenerator, GeneratedFile};
 
 pub struct RustCodeGenerator {
     pub version: String,
@@ -26,13 +26,18 @@ impl RustCodeGenerator {
 }
 
 impl CodeGenerator for RustCodeGenerator {
+    fn target_name(&self) -> &'static str {
+        "rust"
+    }
+
     fn generate_all(
         &self,
         doc: &EtlDocument,
         fault_tree_probs: &BTreeMap<String, f64>,
         _registry: &AsyncApiRegistry,
+        stem: &str,
         _diagnostics: &mut Vec<Diagnostic>,
-    ) -> Result<String, String> {
+    ) -> Result<Vec<GeneratedFile>, String> {
         let mut output = String::new();
 
         output.push_str(&format!(
@@ -58,7 +63,7 @@ impl CodeGenerator for RustCodeGenerator {
             output.push('\n');
         }
 
-        Ok(output)
+        Ok(vec![GeneratedFile::new(format!("{stem}.rs"), output)])
     }
 }
 

@@ -1,0 +1,19 @@
+[package]
+name = "etdl-target-python"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "ETDL Python target: generates a Python developer API (dataclasses, ABC handler interfaces, orchestration functions) bound via stdlib ctypes to the same compiled Rust ETDL runtime the Rust target consumes. Pure Rust to build — no Python needed to build this crate, only to run its generated output."
+keywords = ["etdl", "code-generation", "python", "reliability", "event-driven"]
+categories = ["compilers", "development-tools"]
+homepage = "https://github.com/ETDL-lang/etdl"
+
+[dependencies]
+etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
+etdl-compiler = { version = "0.3.1", path = "../etdl-compiler", default-features = false }
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true

@@ -1,7 +1,7 @@
 # ETDL Specification ↔ Implementation Matrix
 
-**Specification:** ETDL v1.0.0 (`github.com/usamassem/etdl-specification`)
-**Implementation:** workspace 0.2.2 (`github.com/usamassem/etdl`)
+**Specification:** ETDL v1.0.0 (`github.com/ETDL-lang/etdl-specification`)
+**Implementation:** workspace 0.2.2 (`github.com/ETDL-lang/etdl`)
 **Status:** Phase 0 audit (core specification only — see
 [`docs/conformance/supplement-traceability-matrix.md`](conformance/supplement-traceability-matrix.md)
 for everything built since as a supplement rather than a core-spec change)

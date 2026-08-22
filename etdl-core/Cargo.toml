@@ -1,14 +1,14 @@
 [package]
 name = "etdl-core"
-version.workspace = true
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-readme.workspace = true
+readme = "README.md"
 description = "ETDL runtime: BranchMonitor, retry policies, SLA anomaly detection, chaos injection, and telemetry for reliability-aware event-driven services"
 keywords = ["etdl", "reliability", "sla-monitoring", "chaos-engineering", "event-driven"]
 categories = ["development-tools", "asynchronous"]
-homepage = "https://github.com/usamassem/etdl"
+homepage = "https://github.com/ETDL-lang/etdl"
 
 [dependencies]
 getrandom = "0.2"

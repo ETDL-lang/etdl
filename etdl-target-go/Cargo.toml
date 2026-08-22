@@ -1,0 +1,19 @@
+[package]
+name = "etdl-target-go"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "ETDL Go target: generates a Go developer API (structs, interfaces, orchestration functions) bound via cgo to the same compiled Rust ETDL runtime the Rust target consumes. Pure Rust to build - no Go toolchain needed to build this crate, only to build/run its generated output."
+keywords = ["etdl", "code-generation", "go", "cgo", "reliability"]
+categories = ["compilers", "development-tools"]
+homepage = "https://github.com/ETDL-lang/etdl"
+
+[dependencies]
+etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
+etdl-compiler = { version = "0.3.1", path = "../etdl-compiler", default-features = false }
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true

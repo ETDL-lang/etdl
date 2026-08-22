@@ -807,7 +807,7 @@ regression test that reproduces the original failure mode. See
 - `etdl-wasm` crate; `parse_for_diagram`; AsyncAPI `load_from_content`.
 
 ### Changed
-- VS Code extension moved to `github.com/usamassem/etdl-vscode`.
+- VS Code extension moved to `github.com/ETDL-lang/etdl-vscode`.
 
 ## [0.1.1] — metadata & docs
 

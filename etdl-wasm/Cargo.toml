@@ -1,21 +1,21 @@
 [package]
 name = "etdl-wasm"
-version.workspace = true
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-readme.workspace = true
+readme = "README.md"
 description = "ETDL WASM bindings: validate and parse Event Tree Definition Language documents in the browser or Node.js (event tree / fault tree analysis)"
 keywords = ["etdl", "event-tree", "fault-tree", "wasm", "webassembly"]
 categories = ["wasm", "parsing"]
-homepage = "https://github.com/usamassem/etdl"
+homepage = "https://github.com/ETDL-lang/etdl"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-etdl-parser = { version = "0.3.0", path = "../etdl-parser" }
-etdl-compiler = { version = "0.3.0", path = "../etdl-compiler" }
+etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
+etdl-compiler = { version = "0.3.1", path = "../etdl-compiler" }
 wasm-bindgen = "=0.2.100"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -1,18 +1,18 @@
 [package]
 name = "etdl-failure-discovery"
-version.workspace = true
+version = "0.3.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-readme.workspace = true
+readme = "README.md"
 description = "ETDL failure discovery: source-code and runtime analysis producing candidate failure modes mapped to the reliability ontology"
 keywords = ["etdl", "discovery", "failure", "ontology", "static-analysis"]
 categories = ["development-tools", "science"]
-homepage = "https://github.com/usamassem/etdl"
+homepage = "https://github.com/ETDL-lang/etdl"
 
 [dependencies]
-etdl-reliability-core = { version = "0.3.0", path = "../etdl-reliability-core" }
-etdl-reliability-ontology = { version = "0.3.0", path = "../etdl-reliability-ontology" }
+etdl-reliability-core = { version = "0.3.1", path = "../etdl-reliability-core" }
+etdl-reliability-ontology = { version = "0.3.1", path = "../etdl-reliability-ontology" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -21,6 +21,6 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", features = ["full", "visit", "printing"] }
 
 [dev-dependencies]
-etdl-compiler = { version = "0.3.0", path = "../etdl-compiler", default-features = false, features = ["reliability"] }
-etdl-parser = { version = "0.3.0", path = "../etdl-parser" }
-etdl-reliability = { version = "0.3.0", path = "../etdl-reliability" }
+etdl-compiler = { version = "0.3.1", path = "../etdl-compiler", default-features = false, features = ["reliability"] }
+etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
+etdl-reliability = { version = "0.3.1", path = "../etdl-reliability" }

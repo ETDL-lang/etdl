@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![crates.io downloads](https://img.shields.io/crates/d/etdl-cli.svg)](https://crates.io/crates/etdl-cli)
 
-**Compile reliability models into code.** ETDL (Event Tree Definition Language) is a declarative, design-time domain-specific language (DSL) that turns event tree analysis (IEC 62502) and fault tree analysis (IEC 61025) into a single `.etdl` document — and compiles that document into production-ready Rust, fully generated, with probability-driven SLAs, retry policies, and chaos injection built in.
+**Compile reliability models into code.** ETDL (Event Tree Definition Language) is a declarative, design-time domain-specific language (DSL) that turns event tree analysis (IEC 62502) and fault tree analysis (IEC 61025) into a single `.etdl` document — and compiles that document into production-ready Rust, fully generated, with probability-driven SLAs, retry policies, and chaos injection built in. The same validated model can also generate a thin Java, Python, Go, or C# developer API — all backed by that one Rust implementation, never a per-language reimplementation.
 
 No central workflow engine. No orchestration servers. No runtime interpreters. **Your event tree becomes your code.**
 
@@ -105,12 +105,24 @@ pub async fn handle_order_placed_trigger(message: OrderPlaced) -> Result<(), Wor
 cargo install etdl-cli
 
 # 2. Write an .etdl document (or clone the example below)
-# 3. Compile it to Rust
-etdl compile order-fulfillment.etdl --target rust --out-dir ./generated
+# 3. Compile it to Rust (the default target — no --target needed)
+etdl compile order-fulfillment.etdl --out-dir ./generated
+
+# ...or generate a thin binding in another language — all backed by the
+# same authoritative Rust runtime (etdl-runtime-ffi), never a per-language
+# reimplementation of ETDL semantics:
+etdl compile order-fulfillment.etdl --target java --out-dir ./generated
+etdl compile order-fulfillment.etdl --target rust,java,python,go,dotnet --out-dir ./generated
 
 # 4. Validate without generating code
 etdl validate order-fulfillment.etdl
 ```
+
+See [Target Architecture](docs/architecture/targets.md) for how `--target`
+works, which targets are actually implemented today (`rust`, `java`,
+`python`, `go`, `dotnet`), how they all bind to the one Rust runtime
+instead of reimplementing it, and which are designed for but not yet built
+(JavaScript, TypeScript).
 
 ### A complete example
 
@@ -233,8 +245,13 @@ Conditions on barrier branches are written in ECEL, a typed expression language 
 |---|---|---|
 | `etdl-cli` | [![Crates.io](https://img.shields.io/crates/v/etdl-cli.svg)](https://crates.io/crates/etdl-cli) | CLI: compile, validate, analyze, discover, capabilities |
 | `etdl-parser` | [![Crates.io](https://img.shields.io/crates/v/etdl-parser.svg)](https://crates.io/crates/etdl-parser) | `.etdl` document parser, ECEL parser, AsyncAPI 3.0 resolution with JSON Pointer (RFC 6901) |
-| `etdl-compiler` | [![Crates.io](https://img.shields.io/crates/v/etdl-compiler.svg)](https://crates.io/crates/etdl-compiler) | Semantic validation (E/V/W diagnostics), fault tree evaluation, MOCUS cut sets, code generation, reliability resolution + build manifest |
-| `etdl-core` | [![Crates.io](https://img.shields.io/crates/v/etdl-core.svg)](https://crates.io/crates/etdl-core) | Runtime library: BranchMonitor, retry, SLA tracking, chaos injection, telemetry, reliability observations |
+| `etdl-compiler` | [![Crates.io](https://img.shields.io/crates/v/etdl-compiler.svg)](https://crates.io/crates/etdl-compiler) | Semantic validation (E/V/W diagnostics), fault tree evaluation, MOCUS cut sets, target-agnostic `CodeGenerator` trait + the `rust` target, reliability resolution + build manifest |
+| `etdl-core` | [![Crates.io](https://img.shields.io/crates/v/etdl-core.svg)](https://crates.io/crates/etdl-core) | Runtime library: BranchMonitor, retry, SLA tracking, chaos injection, telemetry, reliability observations — the authoritative ETDL implementation every non-Rust target binds to |
+| `etdl-runtime-ffi` | optional, no toolchain to build | Stable, versioned C ABI over `etdl-core` — what every non-Rust target's generated binding actually calls; build with `cargo build -p etdl-runtime-ffi --release` |
+| `etdl-target-java` | optional target | Optional (`--target java`, on by default): Java 21 `java.lang.foreign` binding to `etdl-runtime-ffi` — see [Target Architecture](docs/architecture/targets.md) |
+| `etdl-target-python` | optional target | Optional (`--target python`, on by default): stdlib-`ctypes` binding to `etdl-runtime-ffi` |
+| `etdl-target-go` | optional target | Optional (`--target go`, on by default): `cgo` binding to `etdl-runtime-ffi` |
+| `etdl-target-dotnet` | optional target | Optional (`--target dotnet`, on by default): modern P/Invoke (`LibraryImport`) binding to `etdl-runtime-ffi` |
 | `etdl-reliability-core` | built-in reliability | **Built-in** deterministic layer: probability resolution, `.rprob` artifacts, validation — the only reliability dependency of the compiler |
 | `etdl-reliability` | [![Crates.io](https://img.shields.io/crates/v/etdl-reliability.svg)](https://crates.io/crates/etdl-reliability) | Optional richer reliability library: estimates, uncertainty, distributions, evidence, analysis (empirical/Bayesian/sensitivity) |
 | `etdl-reliability-ontology` | [![Crates.io](https://img.shields.io/crates/v/etdl-reliability-ontology.svg)](https://crates.io/crates/etdl-reliability-ontology) | Canonical failure taxonomy, ontology versioning, candidate mappings |
@@ -265,15 +282,16 @@ deterministically and without inventing probabilities. See
 
 ## Documentation
 
-- **[ETDL Specification v1.0.0](https://github.com/usamassem/etdl-specification)** — the formal spec (CC BY 4.0)
+- **[ETDL Specification v1.0.0](https://github.com/ETDL-lang/etdl-specification)** — the formal spec (CC BY 4.0)
 - **[Getting Started](docs/getting-started.md)** — install, first document, compile, run
 - **[Concepts](docs/concepts/event-trees.md)** — event trees, fault trees, ECEL, probability linking
 - **[Architecture](docs/architecture.md)** — compiler pipeline and codegen contract
+- **[Target Architecture](docs/architecture/targets.md)** — the `CodeGenerator` trait, the `--target` registry, the `java` target, and the roadmap for Go/.NET/JS/TS/Python
 - **[API docs](https://docs.rs/etdl-core)** — `etdl-core`, `etdl-parser`, `etdl-compiler`
 
 ## Editor support
 
-- **[VS Code extension](https://github.com/usamassem/etdl-vscode)** (private) — syntax highlighting, live validation (Rust → WASM, no CLI needed), and interactive IEC 62502/61025 event-tree + fault-tree diagrams. `npm run package` builds a `.vsix`.
+- **[VS Code extension](https://github.com/ETDL-lang/etdl-vscode)** (private) — syntax highlighting, live validation (Rust → WASM, no CLI needed), and interactive IEC 62502/61025 event-tree + fault-tree diagrams. `npm run package` builds a `.vsix`.
 
 ## Examples
 
@@ -281,7 +299,9 @@ deterministically and without inventing probabilities. See
 
 ## Roadmap
 
-- Additional code generation targets (TypeScript, Go) via the `CodeGenerator` trait
+- JavaScript/TypeScript targets — WASM for the browser, native Node bindings for Node.js (see [Target Architecture](docs/architecture/targets.md#future-targets-javascripttypescript) for the design)
+- A published, versioned distribution of `etdl-runtime-ffi` per platform, so downstream projects don't need to build it from this repository themselves
+- Verify `etdl-target-go`'s generated `cgo` code against a real `go build` (implemented but untested — see [Target Architecture](docs/architecture/targets.md#go-etdl-target-go))
 - Minimal cut-set reporting CLI (`enumerate_minimal_cut_sets`)
 - AsyncAPI 3.0 operation generation (asyncapi-codegen integration)
 - Editor language support (syntax highlighting, schema validation)

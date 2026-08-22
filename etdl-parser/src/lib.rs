@@ -2,8 +2,8 @@
 //!
 //! `etdl-parser` reads `.etdl` documents — the declarative, design-time DSL for
 //! reliability-aware event-driven microservices defined by
-//! [IEC 62502:2010 (event tree analysis)](https://github.com/usamassem/etdl-specification)
-//! and [IEC 61025:2006 (fault tree analysis)](https://github.com/usamassem/etdl-specification) —
+//! [IEC 62502:2010 (event tree analysis)](https://github.com/ETDL-lang/etdl-specification)
+//! and [IEC 61025:2006 (fault tree analysis)](https://github.com/ETDL-lang/etdl-specification) —
 //! and resolves their references into AsyncAPI 3.0 contracts.
 //!
 //! # Features

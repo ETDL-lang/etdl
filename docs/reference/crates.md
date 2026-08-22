@@ -95,7 +95,7 @@ The `etdl` binary — see [CLI reference](cli.md).
 
 ## etdl-wasm
 
-WASM bindings compiled with `wasm-bindgen` for the [VS Code extension](https://github.com/usamassem/etdl-vscode):
+WASM bindings compiled with `wasm-bindgen` for the [VS Code extension](https://github.com/ETDL-lang/etdl-vscode):
 
 `etdl-wasm` depends on `etdl-compiler` with default features, so it
 transitively includes `etdl-reliability-core` (the compiler's `reliability`

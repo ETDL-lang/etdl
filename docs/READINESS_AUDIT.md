@@ -1,7 +1,7 @@
 # ETDL Readiness Audit
 
-**Repository:** `github.com/usamassem/etdl`
-**Specification:** `github.com/usamassem/etdl-specification` (ETDL v1.0.0)
+**Repository:** `github.com/ETDL-lang/etdl`
+**Specification:** `github.com/ETDL-lang/etdl-specification` (ETDL v1.0.0)
 **Audit date:** 2026-08-13
 **Audited version:** workspace 0.1.4 (crates `etdl-parser`, `etdl-compiler`, `etdl-core`, `etdl-cli`, `etdl-wasm`)
 

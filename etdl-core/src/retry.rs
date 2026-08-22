@@ -100,7 +100,14 @@ impl RetryPolicy {
 
     /// Compute the backoff delay (ms) before attempt `attempt`, saturating so a
     /// document-controlled `max_attempts`/`backoff_ms` can never overflow.
-    fn delay_ms(&self, attempt: u32) -> u64 {
+    ///
+    /// `pub` (not just used internally by [`RetryPolicy::execute`]) so a
+    /// caller that owns its own retry loop — notably `etdl-runtime-ffi`'s
+    /// synchronous, callback-driven `etdl_retry_policy_execute`, which
+    /// can't use this method's `async`, `tokio`-based sibling across an FFI
+    /// boundary — still computes the exact same backoff sequence instead of
+    /// re-deriving the formula.
+    pub fn delay_ms(&self, attempt: u32) -> u64 {
         match self.strategy {
             BackoffStrategy::Fixed => self.backoff_ms,
             BackoffStrategy::Exponential => {

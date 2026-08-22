@@ -10,9 +10,9 @@ flowchart LR
     AA["AsyncAPI 3.0<br/>YAML/JSON"] --> P
     P --> V["etdl-compiler<br/>validate"]
     V --> FT["fault tree<br/>resolution"]
-    FT --> CG["code generation<br/>RustCodeGenerator"]
-    CG --> GEN["generated .rs"]
-    GEN --> CORE["etdl-core runtime"]
+    FT --> CG["code generation<br/>--target rust|java|python|go|dotnet"]
+    CG --> GEN["generated code<br/>(Rust, or a thin binding<br/>in another language)"]
+    GEN --> CORE["etdl-core runtime<br/>(directly for Rust; via<br/>etdl-runtime-ffi's C ABI otherwise)"]
 ```
 
 ### 1. Parse (`etdl-parser`)
@@ -37,18 +37,21 @@ Structural and semantic checks, grouped by diagnostic class:
 
 `resolve_fault_trees` topologically sorts gates, computes each basic event's probability (`probability` or exponential `failureRate`/`missionTime`), evaluates gates, and returns `FaultTreeProbabilities` — a map of tree → top-event probability.
 
-### 4. Generate code
+### 4. Generate code (`--target`)
 
-The `CodeGenerator` trait is the extension point for new backends:
+`--target` selects one or more [`CodeGenerator`](architecture/targets.md)
+implementations; `rust` (always available) is the default. `java`,
+`python`, `go`, and `dotnet` are also implemented — each generates a thin
+binding to `etdl-runtime-ffi`, a stable C ABI over `etdl-core`, rather
+than reimplementing ETDL semantics in that language. Every target
+consumes the *same* validated document and resolved fault-tree
+probabilities from steps 1–3 above — only this last step differs per
+target. See **[Target Architecture](architecture/targets.md)** for the
+full trait, the `etdl-cli` target registry, the `etdl-runtime-ffi`
+boundary, and how `--target java,python,go,dotnet` (or any combination)
+works.
 
-```rust
-pub trait CodeGenerator {
-    fn generate(&self, doc: &EtlDocument, fault_tree_probs: &FaultTreeProbabilities)
-        -> Result<GeneratedCode, String>;
-}
-```
-
-`RustCodeGenerator` emits:
+`RustCodeGenerator` (the `rust` target, unchanged by the above) emits:
 
 - one `pub async fn handle_<initiating_event>` per event tree,
 - a `const` per linked fault-tree top event (the build-time probability),
@@ -60,11 +63,11 @@ pub trait CodeGenerator {
 
 ### 5. Run (`etdl-core`)
 
-Generated code depends only on `etdl-core` and the message types from your AsyncAPI-generated crates. There is no engine, no server, no interpreter — the tree is the code.
+Rust-target generated code depends only on `etdl-core` and the message types from your AsyncAPI-generated crates. There is no engine, no server, no interpreter — the tree is the code. Other targets depend on that same `etdl-core`, reached through `etdl-runtime-ffi`'s C ABI plus a thin language-specific binding (see [Target Architecture](architecture/targets.md)) — never a separate reimplementation.
 
 ## The codegen contract
 
-Generated functions follow a fixed contract so they compose with any message consumer:
+Rust-target generated functions follow a fixed contract so they compose with any message consumer:
 
 ```rust
 pub async fn handle_<id>(message: <MessageType>) -> Result<(), WorkflowError>
@@ -74,11 +77,16 @@ pub async fn handle_<id>(message: <MessageType>) -> Result<(), WorkflowError>
 - Return `Err` only for non-retryable infrastructure failures in publishing.
 - All probabilistic accounting goes through `BranchMonitor`, so SLA and chaos components observe a single source of truth.
 
+Each target defines its own idiomatic equivalent of this contract — see
+[Target Architecture](architecture/targets.md#what-each-target-generates)
+for the Java/Python/Go/.NET targets' interface-based versions, all backed
+by the same `etdl-runtime-ffi`-bound `BranchMonitor`/`RetryPolicy`.
+
 ## Extension points
 
 | Concern | Extension point |
 |---|---|
-| New language backends | `codegen::CodeGenerator` trait |
+| New code-generation targets | `codegen::CodeGenerator` trait + `etdl-cli`'s target registry — see [Target Architecture](architecture/targets.md) |
 | New gate types | `ast::GateType` + `compute_gate_probability` |
 | New condition operators | `ecel::Comparator` + parser + typeck |
 | Runtime behavior | `etdl-core` modules (monitor, retry, sla, chaos, telemetry) |

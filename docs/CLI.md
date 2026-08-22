@@ -44,16 +44,49 @@ JSON output shape:
 }
 ```
 
-### etdl compile <FILE> --target rust --out-dir <DIR>
+### etdl compile <FILE> [--target <TARGET>] --out-dir <DIR>
 
-Compile a single `.etdl` document to Rust.
+Compile a single `.etdl` document to one or more target languages.
+`--target` defaults to `rust` and accepts a comma-separated list
+(`--target rust,java`) to generate more than one target in a single
+invocation. Every non-`rust` target generates a thin binding to
+`etdl-runtime-ffi` (the compiled Rust runtime) in that language's own
+idiomatic way — none of them reimplement ETDL semantics. See
+[Target Architecture](architecture/targets.md) for the full `--target`
+mechanism, how each target's binding works, and how future targets
+(JavaScript, TypeScript) are expected to be added.
 
 ```bash
-etdl compile order-fulfillment.etdl --target rust --out-dir ./generated
+etdl compile order-fulfillment.etdl --out-dir ./generated               # rust (default)
+etdl compile order-fulfillment.etdl --target rust --out-dir ./generated # same as above, explicit
+etdl compile order-fulfillment.etdl --target java --out-dir ./generated
+etdl compile order-fulfillment.etdl --target python --out-dir ./generated
+etdl compile order-fulfillment.etdl --target go --out-dir ./generated
+etdl compile order-fulfillment.etdl --target dotnet --out-dir ./generated
+etdl compile order-fulfillment.etdl --target rust,java,python,go,dotnet --out-dir ./generated
+```
+
+Running anything generated for `java`/`python`/`go`/`dotnet` also needs a
+built `etdl-runtime-ffi`:
+
+```bash
+cargo build -p etdl-runtime-ffi --release
+```
+
+An unrecognized target name fails immediately (before reading the input
+file) with an error listing every target actually available in this build:
+
+```
+error: unsupported target 'cobol'; available targets: rust, dotnet, go, java, python
 ```
 
 Diagnostics print to stdout; the success/failure summary prints to stderr.
-Writes `<stem>.rs` into the output directory. Exit 0 on success.
+The `rust` target writes a single `<stem>.rs`; other targets follow their
+own ecosystem's output layout (e.g. `java` writes a package/directory tree
+under `--out-dir`) — every target's `--help` text and error messages
+reflect only what the running binary actually has compiled in. Exit 0 on
+success (all requested targets), 1 if any requested target fails to
+generate.
 
 ### etdl analyze <FILE> [OPTIONS]
 
