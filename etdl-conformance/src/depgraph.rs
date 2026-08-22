@@ -40,15 +40,19 @@ pub struct DependencyGraph {
 }
 
 impl DependencyGraph {
-    /// Runs `cargo metadata --format-version=1 --no-deps` in `manifest_dir`
-    /// (the workspace root) and extracts normal dependency edges among
-    /// workspace member packages (external crates like `serde` are kept
-    /// too, so `depends_on` can also assert "X depends on no external
-    /// crate beyond this explicit list" if ever needed, though today's
-    /// vectors only check workspace-internal edges).
+    /// Runs `cargo metadata --format-version=1` in `manifest_dir` (the
+    /// workspace root) and extracts normal dependency edges among all
+    /// resolved packages — workspace members plus every external crate
+    /// (crates.io or git), so edges reaching crates that moved to their
+    /// own repo (e.g. `etdl-reliability`, the `etdl-target-*` crates,
+    /// still resolved here as git dependencies) are still visible. Not
+    /// `--no-deps`: that would restrict `packages` to workspace members
+    /// only, which is exactly the boundary this graph needs to see past
+    /// now that several architecturally-relevant crates live in other
+    /// repos but are still pulled in as ordinary dependencies.
     pub fn from_cargo_metadata(manifest_dir: &std::path::Path) -> Result<Self, DepGraphError> {
         let output = Command::new("cargo")
-            .args(["metadata", "--format-version=1", "--no-deps"])
+            .args(["metadata", "--format-version=1"])
             .current_dir(manifest_dir)
             .output()
             .map_err(|e| DepGraphError::Spawn(e.to_string()))?;

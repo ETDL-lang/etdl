@@ -5,20 +5,23 @@ members = [
     "etdl-compiler",
     "etdl-core",
     "etdl-runtime-ffi",
-    "etdl-target-java",
-    "etdl-target-python",
-    "etdl-target-dotnet",
-    "etdl-target-go",
     "etdl-cli",
     "etdl-wasm",
     "etdl-probability-core",
     "etdl-tree-core",
     "etdl-reliability-core",
-    "etdl-reliability",
-    "etdl-reliability-ontology",
-    "etdl-failure-discovery",
     "etdl-conformance",
 ]
+
+# The following crates moved to their own repos as part of the
+# multi-repo split (see docs/architecture and each repo's README):
+#   etdl-reliability, etdl-reliability-ontology, etdl-failure-discovery
+#     -> https://github.com/ETDL-lang/etdl-reliability
+#   etdl-target-java   -> https://github.com/ETDL-lang/etdl-target-java
+#   etdl-target-python -> https://github.com/ETDL-lang/etdl-target-python
+#   etdl-target-go     -> https://github.com/ETDL-lang/etdl-target-go
+#   etdl-target-dotnet -> https://github.com/ETDL-lang/etdl-target-dotnet
+# etdl-cli and etdl-conformance depend on them as git dependencies now.
 
 # The generated-code compile-check harness is an in-tree crate used by
 # `etdl-compiler/tests/codegen_test.rs`; excluded from normal builds.
@@ -40,3 +43,16 @@ serde_yaml = "0.9"
 serde_json = "1"
 nom = "7"
 thiserror = "2"
+
+# etdl-cli depends on etdl-parser/etdl-compiler/etdl-reliability-core
+# directly via local `path`, but also (optionally) on etdl-target-*
+# and etdl-reliability, which each depend on those same crates via
+# `git = "https://github.com/ETDL-lang/etdl"`. Without this patch,
+# Cargo treats the path and git copies as two different crates (a
+# diamond dependency) and every shared type fails to unify. This
+# redirects any dependency on that git URL back to the crates already
+# in this workspace, so there is exactly one copy of each.
+[patch."https://github.com/ETDL-lang/etdl"]
+etdl-parser = { path = "etdl-parser" }
+etdl-compiler = { path = "etdl-compiler" }
+etdl-reliability-core = { path = "etdl-reliability-core" }
