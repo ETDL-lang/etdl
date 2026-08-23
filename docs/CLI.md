@@ -108,9 +108,7 @@ Options:
   samples. Must be greater than zero.
 - `--seed <N>` — explicit seed for Monte Carlo (default `42`).
 - `--uncertainty <FILE>` — declared uncertainty per basic event (YAML/JSON), as
-  a map of event id to sampling law. Without this, propagation has nothing to
-  propagate and says so rather than reporting a zero-width interval as
-  certainty.
+  a map of event id to sampling law.
 - `--level <L>` — central interval level for the propagated result
   (default `0.95`).
 - `--perturbation <D>` — absolute perturbation size for sensitivity
@@ -119,6 +117,30 @@ Options:
   accounts for. Requires propagation; costs one extra run per uncertain input.
 - `--no-importance`, `--no-sensitivity` — skip those analyses.
 - `--output <FILE>` — write the analysis-result artifact as JSON.
+- `--library-path <DIR>` — additional search path for optional (non-`std.*`)
+  libraries referenced by `libraries:`; repeatable. See
+  [Libraries and reuse](https://github.com/ETDL-lang/etdl-docs) in etdl-docs.
+- `--allow-point-estimates` — see below.
+
+**`--monte-carlo` without declared uncertainty is refused.** If no basic
+event in scope for the run declares uncertainty, propagating still "succeeds"
+mathematically but the result is a zero-width interval — a valid-looking
+number that answers a different question than the one you asked. `etdl
+analyze --monte-carlo` therefore **fails (exit 1)** in that case rather than
+reporting the degenerate interval as if it were a finding of certainty:
+
+```
+error: --monte-carlo requested but no basic event declared propagatable uncertainty for: RootOr
+hint: the reported interval would have zero width, which is a modelling gap (RA013), not a finding of certainty. Declare uncertainty with --uncertainty, or pass --allow-point-estimates to proceed anyway.
+```
+
+Pass `--uncertainty` to declare at least one input's sampling law, or pass
+`--allow-point-estimates` to run anyway (e.g. to inspect importance/sensitivity
+without uncertainty propagation being the point of the run). When some but not
+all inputs declare uncertainty, the run always proceeds; each undeclared input
+is instead held at its point value and reported via a per-input `RA013`
+diagnostic, since it's the *all-inputs-undeclared* case that produces a
+degenerate, misleading result.
 
 ```bash
 etdl analyze service.etdl --dependencies deps.yaml
@@ -226,6 +248,34 @@ which is the default):
 
 When the `reliability` feature is not compiled in, these report a clear
 "support is not enabled in this build" message and exit non-zero.
+
+### etdl library list|resolve <FILE>
+
+Inspect how a document's `libraries:` declarations resolve, without
+compiling. A library reference is a qualified id: `std.*` names the
+built-in standard library (`std.events`, `std.logic`, `std.probability`),
+shipped in the binary; any other name resolves against `--library-path`
+search directories in order, falling back to `<document-dir>/lib/<name>/lib.etdl`
+for a document-local ("user") library.
+
+- `etdl library list` — list the built-in `std.*` modules shipped with this
+  binary.
+- `etdl library resolve <file.etdl> [--library-path <DIR>]...` — resolve
+  every library the document declares and report how each one resolved
+  (built-in / optional / user), without compiling the document.
+
+```bash
+etdl library list
+etdl library resolve service.etdl
+etdl library resolve service.etdl --library-path ./shared-libs
+```
+
+`--library-path` is also accepted by `etdl compile`, `etdl validate`, and
+`etdl analyze`, so the same search path used to inspect resolution is the
+one actually used to compile or analyze. This is the mechanism for sharing
+a Basic Event or Gate — e.g. a platform-wide `PostgresUnavailable` — across
+every document that needs it, instead of copy-pasting the same block (and
+the same cited probability) into each one.
 
 ### etdl discover <FILE|DIR> [OPTIONS]
 

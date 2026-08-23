@@ -133,6 +133,14 @@ enum Command {
             help = "Additional search path for optional (non-std.*) libraries; repeatable"
         )]
         library_path: Vec<PathBuf>,
+
+        #[arg(
+            long,
+            help = "Allow --monte-carlo to proceed even when no basic event in scope \
+                    declares uncertainty (RA013); without this flag such a run is refused, \
+                    since the reported interval would have zero width"
+        )]
+        allow_point_estimates: bool,
     },
     /// Discover candidate failure modes in source code (reliability ontology).
     Discover {
@@ -391,6 +399,7 @@ fn main() {
             uncertainty_ranking,
             output,
             library_path,
+            allow_point_estimates,
         } => {
             let args = AnalyzeArgs {
                 file,
@@ -405,6 +414,7 @@ fn main() {
                 uncertainty_ranking,
                 output,
                 library_path,
+                allow_point_estimates,
             };
             cmd_analyze(&flags, &args)
         }
@@ -646,6 +656,7 @@ struct AnalyzeArgs {
     uncertainty_ranking: bool,
     output: Option<PathBuf>,
     library_path: Vec<PathBuf>,
+    allow_point_estimates: bool,
 }
 
 /// Arguments to the `etdl reliability estimate` command.
@@ -1420,6 +1431,33 @@ fn cmd_dependency_analysis(
                 );
                 return 1;
             }
+        }
+    }
+
+    // Monte Carlo over a model where nothing declared uncertainty produces a
+    // zero-width interval: a valid-looking number that answers a different
+    // question than the one asked (see RA013). Refuse by default rather than
+    // let that pass as a silent success; --allow-point-estimates opts in.
+    if monte_carlo.is_some() && !args.allow_point_estimates {
+        let unpropagated: Vec<&str> = results
+            .iter()
+            .filter(|r| {
+                r.uncertainty
+                    .as_ref()
+                    .is_some_and(|mc| mc.variable_inputs == 0)
+            })
+            .map(|r| r.top_event.as_str())
+            .collect();
+        if !unpropagated.is_empty() {
+            eprintln!(
+                "error: --monte-carlo requested but no basic event declared propagatable \
+                 uncertainty for: {}\n\
+                 hint: the reported interval would have zero width, which is a modelling \
+                 gap (RA013), not a finding of certainty. Declare uncertainty with \
+                 --uncertainty, or pass --allow-point-estimates to proceed anyway.",
+                unpropagated.join(", ")
+            );
+            return 1;
         }
     }
 
