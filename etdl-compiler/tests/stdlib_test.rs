@@ -103,7 +103,7 @@ fn source_only_library_is_valid() {
         .iter()
         .find_map(|r| r.as_ref().ok().filter(|l| l.name == "std.logic"))
         .expect("std.logic parses");
-    assert!(logic.gates.contains_key("AnyOf"));
+    assert!(logic.gates.contains_key("AnyNetworkFailure"));
     let probability = libs
         .iter()
         .find_map(|r| r.as_ref().ok().filter(|l| l.name == "std.probability"))
@@ -281,18 +281,33 @@ components:
 
 #[test]
 fn std_logic_composition_compiles_end_to_end() {
+    // std.logic.AnyNetworkFailure composes real std.events basic events
+    // (each with its own illustrative probability) -- unlike the old
+    // placeholder-signal shape (SignalA/B/C with no probability, requiring
+    // every input overridden just to compile), this needs zero overriding
+    // to be usable: importing std.logic alone should resolve and compile
+    // clean.
     let doc = doc_with_libraries(
         "libraries:\n  - name: std.logic\n    version: \"1.0\"\n",
-        "\"std.logic.AnyOf\"",
+        "\"std.logic.AnyNetworkFailure\"",
     );
     let compiler = Compiler::new();
     let result = compiler.compile_with_base(&doc, &registry_with_message(), std::path::Path::new("."));
-    // The placeholder signals have no probability and are not overridden
-    // here, so V-503 must fire -- exactly the same "underspecified basic
-    // event" rule any other document is subject to, proving std.logic gets
-    // no special treatment.
-    assert!(result.diagnostics.iter().any(|d| d.code == "V-503"));
-    assert!(result.rust_output.is_none());
+
+    let errors: Vec<_> = result.diagnostics.iter().filter(|d| d.is_error()).collect();
+    assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    assert!(result.rust_output.is_some());
+
+    let resolved_names: Vec<&str> = result
+        .resolved_libraries
+        .iter()
+        .map(|l| l.name.as_str())
+        .collect();
+    assert!(resolved_names.contains(&"std.logic"));
+    assert!(
+        resolved_names.contains(&"std.events"),
+        "std.logic depends on std.events; the transitive dependency must also resolve"
+    );
 }
 
 #[test]

@@ -1,8 +1,8 @@
 # std.events — reusable, well-known basic-event definitions.
 #
-# This is the ETDL Standard Library's first module: a small catalog of
-# generic failure mechanisms that show up in most event-driven services, so
-# an engineer does not have to redeclare "a network call timed out" from
+# This is the ETDL Standard Library's first module: a catalog of generic
+# failure mechanisms that show up in most event-driven services, so an
+# engineer does not have to redeclare "a network call timed out" from
 # scratch in every fault tree.
 #
 # This file is ordinary ETDL — parsed by the same `etdl-parser` crate, using
@@ -18,13 +18,18 @@
 #
 # ## Two categories in this file
 #
-# "Failure mechanism" entries (NetworkTimeout, ConnectionRefused,
-# ProcessCrash, DiskFull, ConfigurationMissing) are illustrative technical
-# occurrences with a default probability attached — genuinely useful as
-# fault-tree leaves, but framed around a specific negative outcome. They
-# predate the domain-neutral guidance below and are kept unchanged: a
-# document already importing and referencing one of them must keep working
-# exactly as it did.
+# "Failure mechanism" entries (grouped by domain below) are illustrative
+# technical occurrences with a default probability attached — genuinely
+# useful as fault-tree leaves as-is, no overriding required. The original
+# five (NetworkTimeout, ConnectionRefused, ProcessCrash, DiskFull,
+# ConfigurationMissing) predate the domain-neutral guidance the "Generic
+# identity" category below follows; this file's failure-mechanism category
+# is an intentional, ongoing exception to that guidance — a document
+# already importing and referencing one keeps working exactly as it did,
+# and new entries continue the same pattern deliberately, since a catalog
+# of real, ready-to-use failure mechanisms is the actual point of this
+# file (see `std.logic`'s composite gates, which are built directly on
+# top of these).
 #
 # "Generic identity" entries (Occurred, StateChanged, ConditionMet,
 # SignalReceived) carry NO probability, failure_rate, or mission_time —
@@ -33,8 +38,7 @@
 # any particular meaning. A domain layer (reliability or otherwise)
 # attaches its own likelihood by overriding the qualified id locally (the
 # standard "local declaration wins" rule — see
-# `docs/reference/standard-library.md`), exactly the same mechanism
-# `std.logic`'s placeholder signals use.
+# `docs/reference/standard-library.md`).
 
 etdl: "1.0.0"
 
@@ -42,10 +46,12 @@ library:
   name: std.events
   version: "1.0"
   description: >-
-    Reusable event definitions: illustrative failure-mechanism basic events
-    (network, process, storage) with default probabilities, and neutral
-    occurrence/transition/signal identities with no probability at all. An
-    event does not automatically mean failure — see the file header.
+    Reusable event definitions: a broad catalog of illustrative
+    failure-mechanism basic events (network, auth, resource exhaustion,
+    database, messaging, resilience) with default probabilities, and
+    neutral occurrence/transition/signal identities with no probability
+    at all. An event does not automatically mean failure — see the file
+    header.
 
 components:
   basic_events:
@@ -72,7 +78,7 @@ components:
     SignalReceived:
       description: "an external signal arrived"
 
-    # -- Failure mechanisms: illustrative, probability-bearing (see header). --
+    # -- Failure mechanisms: network. --
     NetworkTimeout:
       description: "A network call did not complete within its configured timeout."
       probability: 0.001
@@ -81,6 +87,44 @@ components:
       description: "A network call was refused because no listener accepted the connection."
       probability: 0.0005
 
+    DnsResolutionFailure:
+      description: "A hostname could not be resolved to an address."
+      probability: 0.0003
+
+    TlsHandshakeFailure:
+      description: "A TLS handshake failed (protocol mismatch, untrusted chain, or negotiation failure)."
+      probability: 0.0004
+
+    ConnectionResetByPeer:
+      description: "The remote end closed the connection unexpectedly mid-exchange."
+      probability: 0.0006
+
+    RequestTimeout:
+      description: "A request completed the connection but did not receive a response within its deadline."
+      probability: 0.002
+
+    UpstreamServiceUnavailable:
+      description: "A dependency responded with an unavailable/unhealthy status (e.g. HTTP 503)."
+      probability: 0.001
+
+    # -- Failure mechanisms: authentication & authorization. --
+    AuthenticationFailed:
+      description: "A credential could not be verified (expired, revoked, or malformed)."
+      probability: 0.002
+
+    AuthorizationDenied:
+      description: "A verified caller was denied because it lacked the required permission."
+      probability: 0.001
+
+    CertificateExpired:
+      description: "A certificate used for authentication or transport had passed its expiry."
+      probability: 0.00002
+
+    TokenExpired:
+      description: "An access/refresh token had passed its expiry at the time of use."
+      probability: 0.001
+
+    # -- Failure mechanisms: process & resource exhaustion. --
     ProcessCrash:
       description: "The process terminated unexpectedly (panic, segfault, or OOM kill)."
       probability: 0.0001
@@ -89,6 +133,65 @@ components:
       description: "A write failed because the local disk had no free space."
       probability: 0.0002
 
+    DiskQuotaExceeded:
+      description: "A write failed because a configured quota, not raw disk capacity, was exceeded."
+      probability: 0.0001
+
+    OutOfMemory:
+      description: "An allocation failed, or the process was killed, due to memory exhaustion."
+      probability: 0.00005
+
+    ConnectionPoolExhausted:
+      description: "A caller could not acquire a connection because the pool had none available."
+      probability: 0.0008
+
+    ThreadPoolExhausted:
+      description: "Work could not be scheduled because the thread/worker pool was saturated."
+      probability: 0.0005
+
     ConfigurationMissing:
       description: "Startup or an operation failed because required configuration was absent."
       probability: 0.00005
+
+    # -- Failure mechanisms: database. --
+    DatabaseDeadlock:
+      description: "A transaction was rolled back after the database detected a deadlock."
+      probability: 0.0003
+
+    DatabaseConnectionLost:
+      description: "An established database connection was dropped mid-operation."
+      probability: 0.0004
+
+    DatabaseQueryTimeout:
+      description: "A query did not complete within its configured timeout."
+      probability: 0.0006
+
+    # -- Failure mechanisms: messaging. --
+    MessageQueueFull:
+      description: "A publish failed because the target queue/topic was at capacity."
+      probability: 0.0004
+
+    SerializationFailure:
+      description: "A value could not be encoded into its wire format."
+      probability: 0.0002
+
+    DeserializationFailure:
+      description: "A received payload could not be decoded against its expected schema."
+      probability: 0.0003
+
+    MessageDeliveryTimeout:
+      description: "A message was published but delivery/acknowledgement did not complete within its deadline."
+      probability: 0.0005
+
+    # -- Failure mechanisms: resilience patterns tripping. --
+    RateLimited:
+      description: "A call was rejected because a rate limit (local or upstream-imposed) was exceeded."
+      probability: 0.002
+
+    RetriesExhausted:
+      description: "An operation failed permanently after exhausting its configured retry budget."
+      probability: 0.0005
+
+    CircuitBreakerOpen:
+      description: "A call was short-circuited because its circuit breaker was open."
+      probability: 0.001

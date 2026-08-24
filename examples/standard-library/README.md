@@ -5,7 +5,7 @@ Four examples, each proving a different part of the architecture:
 | File | Proves |
 |---|---|
 | `service.etdl` (this README) | ETDL source -> module -> import -> user ETDL code, the basic path |
-| `generic-composition.etdl` | `std.events` + `std.logic` together, generic composition, no reliability at all |
+| `generic-composition.etdl` | `std.events`' generic identities + a local gate, no reliability at all |
 | `units-limitation.md` | why `std.units` belongs in stdlib once it exists — and why it doesn't yet |
 | `future-domain-sketch/` | a future *domain* library (`acme.signals`, optional, not built-in) depending on `std.events` |
 
@@ -109,7 +109,7 @@ the library's default is only used when the document doesn't supply one
 itself. See `docs/reference/standard-library.md` for the full resolution
 rules, versioning, and diagnostics reference.
 
-## `generic-composition.etdl`: `std.events` + `std.logic`, no reliability
+## `generic-composition.etdl`: `std.events`, no reliability
 
 ```bash
 etdl analyze generic-composition.etdl
@@ -122,13 +122,16 @@ fault trees: 1
   ReadinessComposition: topEvent probability = 0.354000
 ```
 
-This document declares `libraries: [std.events, std.logic]`, uses
-`std.logic.AnyOf` (`OR(SignalA, SignalB, SignalC)`) as its fault tree's
-`rootCause` directly (no local wrapper gate needed — a qualified id
-resolves as a gate reference exactly like a local one), and overrides all
-three placeholder signals with concrete probabilities. `0.354000` is
+This document declares `libraries: [std.events]`, defines a small local
+`OR` gate over three of `std.events`' generic identities
+(`StateChanged`/`ConditionMet`/`SignalReceived`) as its fault tree's
+`rootCause`, and overrides each qualified id with a concrete probability
+(the standard "local declaration wins" rule). `0.354000` is
 `1 - (1-0.2)(1-0.15)(1-0.05)`. There is no `supplements:` block anywhere in
-this file — the reliability supplement is not involved at all.
+this file — the reliability supplement is not involved at all. (`std.logic`
+isn't used here: as of this version its content is a catalog of
+ready-to-use composite *failure* gates, not domain-neutral composition —
+see `docs/reference/standard-library.md`.)
 
 ## `future-domain-sketch/`: a domain library depending on `std.events`
 

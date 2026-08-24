@@ -271,15 +271,27 @@ This section is the index.
 
 ### `std.events` — reusable event identities
 
-**Purpose:** generic, reusable named occurrences, and (kept for
-non-regression) a small set of illustrative failure-mechanism basic events
-predating the stricter neutrality guidance below.
+**Purpose:** generic, reusable named occurrences, and a broad, ongoing
+catalog of illustrative failure-mechanism basic events across the domains
+real event-driven services actually hit.
 
 **Public constructs** (`components.basic_events`):
 - Generic identity (no probability/failure_rate/mission_time): `Occurred`,
   `StateChanged`, `ConditionMet`, `SignalReceived`.
-- Illustrative failure mechanisms (probability-bearing): `NetworkTimeout`,
-  `ConnectionRefused`, `ProcessCrash`, `DiskFull`, `ConfigurationMissing`.
+- Illustrative failure mechanisms (probability-bearing), by domain:
+  - Network: `NetworkTimeout`, `ConnectionRefused`, `DnsResolutionFailure`,
+    `TlsHandshakeFailure`, `ConnectionResetByPeer`, `RequestTimeout`,
+    `UpstreamServiceUnavailable`.
+  - Auth: `AuthenticationFailed`, `AuthorizationDenied`,
+    `CertificateExpired`, `TokenExpired`.
+  - Process/resource: `ProcessCrash`, `DiskFull`, `DiskQuotaExceeded`,
+    `OutOfMemory`, `ConnectionPoolExhausted`, `ThreadPoolExhausted`,
+    `ConfigurationMissing`.
+  - Database: `DatabaseDeadlock`, `DatabaseConnectionLost`,
+    `DatabaseQueryTimeout`.
+  - Messaging: `MessageQueueFull`, `SerializationFailure`,
+    `DeserializationFailure`, `MessageDeliveryTimeout`.
+  - Resilience: `RateLimited`, `RetriesExhausted`, `CircuitBreakerOpen`.
 
 **Example:** see [`examples/standard-library/service.etdl`](../../examples/standard-library/service.etdl).
 
@@ -296,38 +308,70 @@ faked.
 **Stability:** 1.0. Existing entries are additive-only going forward — see
 the non-regression rule.
 
-### `std.logic` — reusable named boolean composition
+### `std.logic` — ready-to-use composite failure gates
 
-**Purpose:** named, documented composition patterns (`AnyOf`, `AllOf`,
-`MajorityOf`, `ExactlyOneOf`) built from ETDL's native `AND`/`OR`/`VOTING`/
-`XOR` gate types — not a reimplementation of them (see "Core vs. library"
-below).
+**Purpose:** named `OR` gates, each composing several real `std.events`
+failure-mechanism basic events into "any failure in this domain" —
+genuinely usable with zero overriding, not a reimplementation of ETDL's
+native gate types (see "Core vs. library" below).
 
-**Public constructs:**
-- `components.basic_events`: `SignalA`, `SignalB`, `SignalC` — placeholder
-  inputs, no probability. `ExactlyOneOf` (XOR, exactly 2 inputs by ETDL's
-  own gate rule) uses only `SignalA`/`SignalB`.
-- `components.gates`: `AnyOf` (OR), `AllOf` (AND), `MajorityOf` (VOTING,
-  k=2), `ExactlyOneOf` (XOR).
+This module previously offered generic composition patterns (`AnyOf`,
+`AllOf`, `MajorityOf`, `ExactlyOneOf`) over placeholder inputs
+(`SignalA`/`SignalB`/`SignalC`) a caller had to override every one of to
+get anything useful — reworked, not extended, because a pattern nobody can
+use without fully overriding it isn't meaningfully reusable (see
+`design/adr` in `etdl-specification` for the decision record on why
+library content stays scoped to Basic Events/Gates rather than gaining a
+templating mechanism to fix this the other way).
 
-**Example:** see [`examples/standard-library/service.etdl`](../../examples/standard-library/service.etdl),
-which imports `std.logic`, overrides all three signals with real
-probabilities, and uses `std.logic.AnyOf` as a gate input.
+**Public constructs** (`components.gates`, each `OR` over the listed
+`std.events` inputs):
+- `AnyNetworkFailure` — `NetworkTimeout`, `ConnectionRefused`,
+  `DnsResolutionFailure`, `TlsHandshakeFailure`, `ConnectionResetByPeer`,
+  `RequestTimeout`, `UpstreamServiceUnavailable`.
+- `AnyAuthFailure` — `AuthenticationFailed`, `AuthorizationDenied`,
+  `CertificateExpired`, `TokenExpired`.
+- `AnyResourceExhaustion` — `ProcessCrash`, `DiskFull`,
+  `DiskQuotaExceeded`, `OutOfMemory`, `ConnectionPoolExhausted`,
+  `ThreadPoolExhausted`.
+- `AnyDatabaseFailure` — `DatabaseDeadlock`, `DatabaseConnectionLost`,
+  `DatabaseQueryTimeout`.
+- `AnyMessagingFailure` — `MessageQueueFull`, `SerializationFailure`,
+  `DeserializationFailure`, `MessageDeliveryTimeout`.
+- `AnyResilienceTrip` — `RateLimited`, `RetriesExhausted`,
+  `CircuitBreakerOpen`.
 
-**Reuse pattern:** override every placeholder input a gate uses (declare
-the same qualified id, e.g. `std.logic.SignalA`, under the importing
-fault tree's own `basicEvents:`) to repurpose a named pattern. A gate
-input that resolves to a library placeholder still lacking a probability
-fails the *existing* `V-503` check ("supplies neither probability nor
-failureRate") — the same rule that already applies to any other
-underspecified basic event; nothing new was added to enforce this.
+**Example:**
 
-**Limitations:** inputs are NOT parameterizable — `std.logic.AnyOf` always
-means "OR of SignalA, SignalB, SignalC," never "OR of whatever the caller
-passes." True template parameterization is a proposed core primitive, not
+```yaml
+libraries:
+  - name: std.logic
+    version: "1.0"
+faultTrees:
+  ServiceDegraded:
+    topEvent: { id: Top, description: "the service is degraded", rootCause: "std.logic.AnyNetworkFailure" }
+```
+
+No `basicEvents:` override needed — `std.logic` `dependsOn: std.events`
+(Section 5.1.9's transitive-dependency mechanism), so every input each
+gate composes resolves with its own real illustrative probability
+automatically.
+
+**Reuse pattern:** reference a composite gate directly for "any failure in
+this domain," or override any *individual* `std.events` leaf it composes
+(declare the same qualified id, e.g. `std.events.NetworkTimeout`, under
+your own fault tree's `basicEvents:` — the standard "local declaration
+wins" rule) to tune just that one mechanism's probability without
+touching this file or the rest of the composition.
+
+**Limitations:** each gate's input set is fixed — `std.logic.AnyNetworkFailure`
+always means exactly those seven mechanisms, never a caller-chosen subset.
+True template parameterization remains a proposed core primitive, not
 implemented — see below.
 
-**Stability:** 1.0.
+**Stability:** 1.0. The prior `AnyOf`/`AllOf`/`MajorityOf`/`ExactlyOneOf`/
+`SignalA`/`SignalB`/`SignalC` constructs were removed in this rework
+(pre-1.0-release, no non-regression guarantee applied to them).
 
 ### `std.probability` — domain-neutral probability foundation
 
@@ -444,15 +488,16 @@ task, not implemented) would depend on `std.*`, never the reverse.
 
 ## Future tree-event domains
 
-`std.events` and `std.logic` are deliberately structured so a future
+`std.events`'s *generic identity* entries (`Occurred`, `StateChanged`,
+`ConditionMet`, `SignalReceived`) are deliberately structured so a future
 tree-event supplement could sit between them and a domain:
 
 ```
 ETDL Core
    |
-std.events    (generic occurrence identity)
-   |
-std.logic     (generic boolean composition)
+std.events    (generic occurrence identity — Occurred/StateChanged/
+   |            ConditionMet/SignalReceived only; its failure-mechanism
+   |            entries are a separate, non-neutral category, see below)
    |
 Tree Event Supplement      (NOT implemented — a future generic notion of
    |                         "compose named events into a tree, evaluate
@@ -464,22 +509,29 @@ Tree Event Supplement      (NOT implemented — a future generic notion of
    +-- Other Tree Domains
 ```
 
-Nothing about this version's `std.events`/`std.logic` design assumes
-failure/fault/hazard semantics (see "No reliability leakage" below), which
-is what keeps this door open. The Tree Event Supplement itself is out of
-scope here — this section documents the shape the architecture supports,
-not new implementation.
+`std.logic` is no longer part of this diagram: as of this version its
+content (§"`std.logic`" above) is a catalog of ready-to-use composite
+*failure* gates, deliberately not domain-neutral — that trade was made so
+the module would be genuinely reusable without overriding (see the ADR
+referenced above). A document that needs domain-neutral boolean
+composition today combines `std.events`' generic identities with a small
+local gate of its own (see
+[`examples/standard-library/generic-composition.etdl`](../../examples/standard-library/generic-composition.etdl))
+rather than through `std.logic`.
 
 ## No reliability leakage
 
-`std.events` and `std.logic` do not define, reference, or depend on:
-failure probability as a first-class concept (the *generic* `Occurred`/
-`StateChanged`/`ConditionMet`/`SignalReceived` entries carry no probability
-field at all — only the pre-existing, unchanged failure-mechanism entries
-do, and those predate this task), MTBF, hazard rate, failure mode, or
-reliability block. `std.logic`'s placeholder signals (`SignalA`/`SignalB`/
-`SignalC`) are named for their role in boolean composition, not for any
-assumed outcome.
+This guarantee now applies to `std.events`' *generic identity* entries
+specifically, not the module as a whole: `Occurred`/`StateChanged`/
+`ConditionMet`/`SignalReceived` define, reference, and depend on nothing
+about failure probability, MTBF, hazard rate, failure mode, or reliability
+blocks — no probability field at all until a document overrides one.
+`std.events`' failure-mechanism entries (the large majority of the module)
+are the opposite by design: illustrative, probability-bearing, and framed
+around a specific negative outcome — that's the whole point of a "failure
+mechanism" catalog. `std.logic`'s composite gates inherit this same
+non-neutral framing from the `std.events` entries they compose, which is
+why `std.logic` is no longer part of the domain-neutral story above.
 
 ## Relationship to the Generic Tree Event Supplement
 

@@ -1,10 +1,19 @@
-# Example 1: generic event + logic composition, no reliability involved.
+# Example 1: generic event composition, no reliability involved.
 #
-# This document imports std.events and std.logic together and composes a
-# generic readiness signal from them. Nothing here is about failure,
-# fault, or hazard — `std.events`/`std.logic` are domain-neutral, and this
-# example deliberately avoids the reliability supplement entirely (no
+# This document imports std.events and composes a generic readiness
+# signal from its domain-neutral "generic identity" entries. Nothing here
+# is about failure, fault, or hazard — std.events' generic identities
+# carry no probability of their own until overridden, and this example
+# deliberately avoids the reliability supplement entirely (no
 # `supplements:` block) to prove it.
+#
+# std.logic is not used here: as of this version its content is a
+# catalog of ready-to-use composite FAILURE gates (AnyNetworkFailure,
+# AnyAuthFailure, ...) built from std.events' failure-mechanism entries —
+# genuinely reusable as-is, but no longer domain-neutral, so it doesn't
+# fit this specific demo. The boolean composition below is instead a
+# small local gate, the same way any document already combines several
+# basic events.
 
 etdl: "1.0.0"
 info:
@@ -17,8 +26,6 @@ asyncapi_imports:
 
 libraries:
   - name: std.events
-    version: "1.0"
-  - name: std.logic
     version: "1.0"
 
 eventTrees:
@@ -37,18 +44,22 @@ faultTrees:
     topEvent:
       id: Top
       description: "at least one readiness signal is present"
-      # std.logic.AnyOf is OR(SignalA, SignalB, SignalC), resolved directly
-      # as the root gate — no local wrapper gate needed. We override all
-      # three placeholder signals with concrete probabilities. Nothing
-      # about "failure" appears anywhere in this composition.
-      rootCause: "std.logic.AnyOf"
+      rootCause: G
+    gates:
+      G:
+        type: OR
+        description: "any one of three generic, domain-neutral occurrences"
+        inputs:
+          - "std.events.StateChanged"
+          - "std.events.ConditionMet"
+          - "std.events.SignalReceived"
     basicEvents:
-      std.logic.SignalA:
-        description: "a state changed (using std.events' generic StateChanged identity)"
+      std.events.StateChanged:
+        description: "a state changed (overriding std.events' generic identity with a local probability)"
         probability: 0.2
-      std.logic.SignalB:
-        description: "a condition was met (using std.events' generic ConditionMet identity)"
+      std.events.ConditionMet:
+        description: "a condition was met (overriding std.events' generic identity with a local probability)"
         probability: 0.15
-      std.logic.SignalC:
-        description: "an external signal arrived (using std.events' generic SignalReceived identity)"
+      std.events.SignalReceived:
+        description: "an external signal arrived (overriding std.events' generic identity with a local probability)"
         probability: 0.05

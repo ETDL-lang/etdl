@@ -1,37 +1,30 @@
-# std.logic — reusable named boolean composition.
+# std.logic — reusable, ready-to-use composite failure gates.
 #
 # ETDL already has AND/OR/NOT/XOR/VOTING as native gate types (see
 # `docs/reference/standard-library.md`'s core-vs-library rule: this library
-# does not redefine them). What it provides instead is a small set of named,
-# documented COMPOSITION PATTERNS built from those core gate types, over
-# three neutral placeholder inputs (`SignalA`, `SignalB`, `SignalC`).
+# does not redefine them). This module used to provide named composition
+# PATTERNS over placeholder inputs (`SignalA`/`SignalB`/`SignalC`) a caller
+# had to override every one of to get anything useful out of — that shape
+# was reworked, not just extended, because a pattern nobody can use
+# without fully overriding it is not meaningfully reusable: the caller
+# types just as much either way. See design/adr in etdl-specification for
+# the decision record on why library content stays scoped to Basic
+# Events/Gates rather than gaining a templating mechanism to fix this the
+# other way.
 #
-# "Signal" is used deliberately instead of "event" here: this module is
-# about pure boolean combination, independent of what the inputs mean.
-# A signal has no probability of its own — it is not an occurrence, a
-# failure, or a success; it is a description-only placeholder standing in
-# for whatever boolean input the importing document supplies.
+# Instead, this module composes REAL, already-useful `std.events` basic
+# events (see that module) into named OR gates over one failure domain —
+# "any network-layer failure," "any auth failure," and so on. These are
+# genuinely usable as-is: `std.logic.AnyNetworkFailure` needs no
+# overriding to mean something, because every input it OR's together
+# already has a real illustrative probability from `std.events`. A
+# document can reference one directly as a Gate input or Fault Tree
+# `rootCause`, or override any individual `std.events` leaf it composes
+# (the standard "local declaration wins" rule) to tune just that one
+# mechanism's probability without touching this file.
 #
-# ## Reuse pattern: override, not parameterize
-#
-# ETDL has no function/template mechanism — a gate's `inputs:` are fixed
-# string ids, not parameters a caller can substitute at import time. The
-# reuse mechanism this version actually has is override: a document that
-# imports `std.logic.AnyOf` and separately declares its OWN basic event
-# under the qualified id `std.logic.SignalA` (with a real probability) gets
-# "OR of MY SignalA, and the library's SignalB/SignalC defaults" — the
-# local declaration always wins over the library's placeholder. Override
-# every placeholder input a gate uses to fully repurpose it.
-#
-# True caller-supplied parameterization (substituting arbitrary inputs into
-# a reusable gate template without overriding every placeholder by name) is
-# NOT implemented and would require a new core primitive (a template/macro
-# gate). This is a deliberate, documented limitation — see
-# `docs/reference/standard-library.md` for the proposal and why it is
-# deferred rather than force-fit into this version.
-#
-# This file is ordinary ETDL: the same `components` schema (`gates`,
-# `basic_events`) any document already uses. No native (Rust) component.
+# This file is ordinary ETDL: the same `components` schema (`gates`) any
+# document already uses. No native (Rust) component.
 
 etdl: "1.0.0"
 
@@ -39,38 +32,69 @@ library:
   name: std.logic
   version: "1.0"
   description: >-
-    Named boolean composition patterns (AnyOf, AllOf, MajorityOf,
-    ExactlyOneOf) built from ETDL's native AND/OR/VOTING/XOR gate types,
-    over overridable placeholder signals. Domain-neutral: carries no
-    probability, failure, or reliability semantics of its own.
+    Ready-to-use composite failure gates (AnyNetworkFailure,
+    AnyAuthFailure, AnyResourceExhaustion, AnyDatabaseFailure,
+    AnyMessagingFailure, AnyResilienceTrip), each an OR gate over real
+    std.events basic events — no overriding required to use as-is.
+  dependsOn:
+    - name: std.events
+      version: "1.0"
 
 components:
-  basic_events:
-    SignalA:
-      description: "a boolean input signal (placeholder — override with your own basic event, or supply a probability, to use it)"
-    SignalB:
-      description: "a boolean input signal (placeholder — override with your own basic event, or supply a probability, to use it)"
-    SignalC:
-      description: "a boolean input signal (placeholder — override with your own basic event, or supply a probability, to use it)"
-
   gates:
-    AnyOf:
+    AnyNetworkFailure:
       type: OR
-      description: "true when at least one of SignalA, SignalB, SignalC is true"
-      inputs: ["std.logic.SignalA", "std.logic.SignalB", "std.logic.SignalC"]
+      description: "true when any network-layer failure mechanism occurs"
+      inputs:
+        - "std.events.NetworkTimeout"
+        - "std.events.ConnectionRefused"
+        - "std.events.DnsResolutionFailure"
+        - "std.events.TlsHandshakeFailure"
+        - "std.events.ConnectionResetByPeer"
+        - "std.events.RequestTimeout"
+        - "std.events.UpstreamServiceUnavailable"
 
-    AllOf:
-      type: AND
-      description: "true only when SignalA, SignalB, and SignalC are all true"
-      inputs: ["std.logic.SignalA", "std.logic.SignalB", "std.logic.SignalC"]
+    AnyAuthFailure:
+      type: OR
+      description: "true when any authentication or authorization failure mechanism occurs"
+      inputs:
+        - "std.events.AuthenticationFailed"
+        - "std.events.AuthorizationDenied"
+        - "std.events.CertificateExpired"
+        - "std.events.TokenExpired"
 
-    MajorityOf:
-      type: VOTING
-      k: 2
-      description: "true when at least 2 of SignalA, SignalB, SignalC are true"
-      inputs: ["std.logic.SignalA", "std.logic.SignalB", "std.logic.SignalC"]
+    AnyResourceExhaustion:
+      type: OR
+      description: "true when any process/resource exhaustion mechanism occurs"
+      inputs:
+        - "std.events.ProcessCrash"
+        - "std.events.DiskFull"
+        - "std.events.DiskQuotaExceeded"
+        - "std.events.OutOfMemory"
+        - "std.events.ConnectionPoolExhausted"
+        - "std.events.ThreadPoolExhausted"
 
-    ExactlyOneOf:
-      type: XOR
-      description: "true when exactly one of SignalA, SignalB is true (XOR is defined for exactly 2 inputs)"
-      inputs: ["std.logic.SignalA", "std.logic.SignalB"]
+    AnyDatabaseFailure:
+      type: OR
+      description: "true when any database failure mechanism occurs"
+      inputs:
+        - "std.events.DatabaseDeadlock"
+        - "std.events.DatabaseConnectionLost"
+        - "std.events.DatabaseQueryTimeout"
+
+    AnyMessagingFailure:
+      type: OR
+      description: "true when any messaging failure mechanism occurs"
+      inputs:
+        - "std.events.MessageQueueFull"
+        - "std.events.SerializationFailure"
+        - "std.events.DeserializationFailure"
+        - "std.events.MessageDeliveryTimeout"
+
+    AnyResilienceTrip:
+      type: OR
+      description: "true when any resilience pattern (rate limit, retry budget, circuit breaker) trips"
+      inputs:
+        - "std.events.RateLimited"
+        - "std.events.RetriesExhausted"
+        - "std.events.CircuitBreakerOpen"
