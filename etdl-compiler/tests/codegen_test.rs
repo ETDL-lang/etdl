@@ -27,6 +27,12 @@ const IN_MATCHES_FIXTURE: &str = "in-matches-check.etdl";
 // real Rust struct definitions rather than relying on an external
 // AsyncAPI-toolchain-generated `{alias}::messages::*` module.
 const INLINE_MESSAGES_FIXTURE: &str = "inline-messages.etdl";
+// Exercises the extended ECEL grammar (spec §6.2 boolean combinators,
+// arithmetic, built-in functions, `defined()`) and, specifically,
+// `message.headers.*` access — previously broken codegen (direct field
+// access on `Option<serde_json::Value>`, which cannot compile) that this
+// fixture's `HeadersBarrier` node exists to catch a regression on.
+const ECEL_EXTENDED_FIXTURE: &str = "ecel-extended.etdl";
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -102,4 +108,5 @@ fn generated_code_compiles() {
     compile_and_check(FIXTURE, "gen-check");
     compile_and_check(IN_MATCHES_FIXTURE, "gen-check");
     compile_and_check(INLINE_MESSAGES_FIXTURE, "gen-check-inline");
+    compile_and_check(ECEL_EXTENDED_FIXTURE, "gen-check-inline");
 }

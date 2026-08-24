@@ -9,10 +9,29 @@ use nom::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Conformance floor for the total operand count in one `condition-expr`
+/// (spec §6.2): a Conforming Parser MUST accept at least this many. This is
+/// the actual limit this implementation enforces (well above the floor);
+/// see `count_operands` in `etdl-compiler`'s typeck module (rule V-206).
+pub const MAX_CONDITION_OPERANDS: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Condition {
     Default,
+    Expr(BoolExpr),
+}
+
+/// A boolean expression: any combination of `comparison`/`quantifier-expr`/
+/// `defined-expr` joined by `&&`, `||`, and unary `!` (spec §6.2). A bare
+/// `Comparison` (no combinator) is the pre-existing, common case.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum BoolExpr {
+    And(Box<BoolExpr>, Box<BoolExpr>),
+    Or(Box<BoolExpr>, Box<BoolExpr>),
+    Not(Box<BoolExpr>),
     Comparison(Comparison),
+    Quantifier(QuantifierExpr),
+    Defined(PathExpr),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,10 +41,56 @@ pub struct Comparison {
     pub right: Operand,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuantifierKind {
+    Any,
+    All,
+}
+
+/// `quantifier "(" path-expr "," comparison ")"` (spec §6.2, §6.4). The
+/// inner `comparison` is deliberately a plain `Comparison`, not a
+/// `BoolExpr` — a quantifier's inner test MUST NOT contain `&&`/`||`/`!`
+/// (spec §6.4), so this can't nest arbitrary boolean expressions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuantifierExpr {
+    pub kind: QuantifierKind,
+    pub path: PathExpr,
+    pub comparison: Comparison,
+}
+
+/// An `operand` (spec §6.2): either a `value-expr` (a path, number,
+/// arithmetic expression, or built-in function call) or a non-numeric
+/// `literal` (string/bool/null/array). A bare numeric literal always
+/// parses as `Value(ValueExpr::Number(_))`, never `Literal(Literal::Number(_))`
+/// — `value-expr` is tried first in the grammar's ordered choice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Operand {
-    Path(PathExpr),
+    Value(ValueExpr),
     Literal(Literal),
+}
+
+/// `value-expr` (spec §6.2): a `path-expr`/`number`/`func-call`, optionally
+/// combined with `+`/`-`/`*`/`/`. A bare `Path`/`Number`, with no
+/// arithmetic operator, is the pre-existing, common case.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ValueExpr {
+    Path(PathExpr),
+    Number(f64),
+    Call(FuncName, Box<ValueExpr>),
+    Add(Box<ValueExpr>, Box<ValueExpr>),
+    Sub(Box<ValueExpr>, Box<ValueExpr>),
+    Mul(Box<ValueExpr>, Box<ValueExpr>),
+    Div(Box<ValueExpr>, Box<ValueExpr>),
+}
+
+/// The fixed, non-extensible built-in function set (spec §6.5.1) — not a
+/// general function-call mechanism.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FuncName {
+    Length,
+    Abs,
+    Lower,
+    Upper,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,10 +138,10 @@ pub fn parse_condition(input: &str) -> Result<Condition, String> {
         return Ok(Condition::Default);
     }
 
-    match parse_comparison(input) {
-        Ok((remaining, comparison)) => {
+    match parse_bool_expr(input) {
+        Ok((remaining, expr)) => {
             if remaining.trim().is_empty() {
-                Ok(Condition::Comparison(comparison))
+                Ok(Condition::Expr(expr))
             } else {
                 Err(format!(
                     "trailing content in condition expression: '{}'",
@@ -86,6 +151,92 @@ pub fn parse_condition(input: &str) -> Result<Condition, String> {
         }
         Err(e) => Err(format!("failed to parse condition expression: {}", e)),
     }
+}
+
+// --- bool-expr / bool-term / bool-factor / bool-atom (standard precedence
+// climbing: `!` binds tightest, then `&&`, then `||`; spec §6.2, §6.5). ---
+
+fn parse_bool_expr(input: &str) -> IResult<&str, BoolExpr> {
+    let (input, first) = parse_bool_term(input)?;
+    let (input, rest) = many0(preceded(
+        delimited(multispace0, tag("||"), multispace0),
+        parse_bool_term,
+    ))(input)?;
+    Ok((
+        input,
+        rest.into_iter()
+            .fold(first, |acc, next| BoolExpr::Or(Box::new(acc), Box::new(next))),
+    ))
+}
+
+fn parse_bool_term(input: &str) -> IResult<&str, BoolExpr> {
+    let (input, first) = parse_bool_factor(input)?;
+    let (input, rest) = many0(preceded(
+        delimited(multispace0, tag("&&"), multispace0),
+        parse_bool_factor,
+    ))(input)?;
+    Ok((
+        input,
+        rest.into_iter()
+            .fold(first, |acc, next| BoolExpr::And(Box::new(acc), Box::new(next))),
+    ))
+}
+
+fn parse_bool_factor(input: &str) -> IResult<&str, BoolExpr> {
+    alt((
+        map(
+            preceded(pair(char('!'), multispace0), parse_bool_atom),
+            |e| BoolExpr::Not(Box::new(e)),
+        ),
+        parse_bool_atom,
+    ))(input)
+}
+
+fn parse_bool_atom(input: &str) -> IResult<&str, BoolExpr> {
+    alt((
+        map(parse_quantifier_expr, BoolExpr::Quantifier),
+        map(parse_defined_expr, BoolExpr::Defined),
+        map(parse_comparison, BoolExpr::Comparison),
+        delimited(
+            pair(char('('), multispace0),
+            parse_bool_expr,
+            pair(multispace0, char(')')),
+        ),
+    ))(input)
+}
+
+fn parse_quantifier_expr(input: &str) -> IResult<&str, QuantifierExpr> {
+    let (input, kind) = alt((
+        value(QuantifierKind::Any, tag("any")),
+        value(QuantifierKind::All, tag("all")),
+    ))(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, path) = parse_path_expr(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(',')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, comparison) = parse_comparison(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((
+        input,
+        QuantifierExpr {
+            kind,
+            path,
+            comparison,
+        },
+    ))
+}
+
+fn parse_defined_expr(input: &str) -> IResult<&str, PathExpr> {
+    let (input, _) = tag("defined")(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, path) = parse_path_expr(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, path))
 }
 
 fn parse_comparison(input: &str) -> IResult<&str, Comparison> {
@@ -99,9 +250,70 @@ fn parse_comparison(input: &str) -> IResult<&str, Comparison> {
 
 fn parse_operand(input: &str) -> IResult<&str, Operand> {
     alt((
-        map(parse_path_expr, Operand::Path),
+        map(parse_value_expr, Operand::Value),
         map(parse_literal, Operand::Literal),
     ))(input)
+}
+
+// --- value-expr / value-term / value-atom (spec §6.2, §6.5: `*`/`/` bind
+// tighter than `+`/`-`). ---
+
+fn parse_value_expr(input: &str) -> IResult<&str, ValueExpr> {
+    let (input, first) = parse_value_term(input)?;
+    let (input, rest) = many0(pair(
+        delimited(multispace0, alt((char('+'), char('-'))), multispace0),
+        parse_value_term,
+    ))(input)?;
+    Ok((
+        input,
+        rest.into_iter().fold(first, |acc, (op, next)| match op {
+            '+' => ValueExpr::Add(Box::new(acc), Box::new(next)),
+            _ => ValueExpr::Sub(Box::new(acc), Box::new(next)),
+        }),
+    ))
+}
+
+fn parse_value_term(input: &str) -> IResult<&str, ValueExpr> {
+    let (input, first) = parse_value_atom(input)?;
+    let (input, rest) = many0(pair(
+        delimited(multispace0, alt((char('*'), char('/'))), multispace0),
+        parse_value_atom,
+    ))(input)?;
+    Ok((
+        input,
+        rest.into_iter().fold(first, |acc, (op, next)| match op {
+            '*' => ValueExpr::Mul(Box::new(acc), Box::new(next)),
+            _ => ValueExpr::Div(Box::new(acc), Box::new(next)),
+        }),
+    ))
+}
+
+fn parse_value_atom(input: &str) -> IResult<&str, ValueExpr> {
+    alt((
+        parse_func_call,
+        map(parse_path_expr, ValueExpr::Path),
+        map(parse_number, ValueExpr::Number),
+        delimited(
+            pair(char('('), multispace0),
+            parse_value_expr,
+            pair(multispace0, char(')')),
+        ),
+    ))(input)
+}
+
+fn parse_func_call(input: &str) -> IResult<&str, ValueExpr> {
+    let (input, name) = alt((
+        value(FuncName::Length, tag("length")),
+        value(FuncName::Abs, tag("abs")),
+        value(FuncName::Lower, tag("lower")),
+        value(FuncName::Upper, tag("upper")),
+    ))(input)?;
+    let (input, _) = char('(')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, arg) = parse_value_expr(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(')')(input)?;
+    Ok((input, ValueExpr::Call(name, Box::new(arg))))
 }
 
 fn parse_path_expr(input: &str) -> IResult<&str, PathExpr> {
@@ -230,9 +442,49 @@ fn parse_string_literal(input: &str) -> IResult<&str, String> {
     )(input)
 }
 
+/// Counts operands (every `Comparison` leaf's two operands, plus every
+/// arithmetic/function operand nested within them) in a `BoolExpr` tree, for
+/// rule V-206's conformance-floor check (spec §6.2).
+pub fn count_operands(expr: &BoolExpr) -> usize {
+    match expr {
+        BoolExpr::And(a, b) | BoolExpr::Or(a, b) => count_operands(a) + count_operands(b),
+        BoolExpr::Not(a) => count_operands(a),
+        BoolExpr::Comparison(cmp) => count_operand(&cmp.left) + count_operand(&cmp.right),
+        BoolExpr::Quantifier(q) => {
+            count_operand(&q.comparison.left) + count_operand(&q.comparison.right)
+        }
+        BoolExpr::Defined(_) => 1,
+    }
+}
+
+fn count_operand(operand: &Operand) -> usize {
+    match operand {
+        Operand::Value(v) => count_value_expr(v),
+        Operand::Literal(_) => 1,
+    }
+}
+
+fn count_value_expr(expr: &ValueExpr) -> usize {
+    match expr {
+        ValueExpr::Path(_) | ValueExpr::Number(_) => 1,
+        ValueExpr::Call(_, arg) => count_value_expr(arg),
+        ValueExpr::Add(a, b)
+        | ValueExpr::Sub(a, b)
+        | ValueExpr::Mul(a, b)
+        | ValueExpr::Div(a, b) => count_value_expr(a) + count_value_expr(b),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn as_comparison(expr: &BoolExpr) -> &Comparison {
+        match expr {
+            BoolExpr::Comparison(c) => c,
+            _ => panic!("expected a bare comparison, got {:?}", expr),
+        }
+    }
 
     #[test]
     fn test_default_condition() {
@@ -243,10 +495,11 @@ mod tests {
     fn test_simple_comparison() {
         let cond = parse_condition("message.payload.status == \"ok\"").unwrap();
         match cond {
-            Condition::Comparison(c) => {
+            Condition::Expr(expr) => {
+                let c = as_comparison(&expr);
                 assert_eq!(c.op, Comparator::Eq);
                 match &c.left {
-                    Operand::Path(p) => assert_eq!(p.segments.len(), 3),
+                    Operand::Value(ValueExpr::Path(p)) => assert_eq!(p.segments.len(), 3),
                     _ => panic!("expected path"),
                 }
                 match &c.right {
@@ -262,9 +515,10 @@ mod tests {
     fn test_wildcard_path() {
         let cond = parse_condition("message.payload.items[*].qty > 0").unwrap();
         match cond {
-            Condition::Comparison(c) => {
+            Condition::Expr(expr) => {
+                let c = as_comparison(&expr);
                 match &c.left {
-                    Operand::Path(p) => {
+                    Operand::Value(ValueExpr::Path(p)) => {
                         assert_eq!(p.segments.len(), 5); // message, payload, items, [*], qty
                         assert_eq!(p.segments[3], PathSegment::Wildcard);
                     }
@@ -279,9 +533,7 @@ mod tests {
     fn test_in_operator() {
         let cond = parse_condition("message.payload.type in [\"A\", \"B\"]").unwrap();
         match cond {
-            Condition::Comparison(c) => {
-                assert_eq!(c.op, Comparator::In);
-            }
+            Condition::Expr(expr) => assert_eq!(as_comparison(&expr).op, Comparator::In),
             _ => panic!("expected comparison"),
         }
     }
@@ -290,9 +542,7 @@ mod tests {
     fn test_matches_operator() {
         let cond = parse_condition("message.payload.email matches \"@\"").unwrap();
         match cond {
-            Condition::Comparison(c) => {
-                assert_eq!(c.op, Comparator::Matches);
-            }
+            Condition::Expr(expr) => assert_eq!(as_comparison(&expr).op, Comparator::Matches),
             _ => panic!("expected comparison"),
         }
     }
@@ -301,8 +551,8 @@ mod tests {
     fn test_bracket_index() {
         let cond = parse_condition("message.payload.items[0].name == \"test\"").unwrap();
         match cond {
-            Condition::Comparison(c) => match &c.left {
-                Operand::Path(p) => {
+            Condition::Expr(expr) => match &as_comparison(&expr).left {
+                Operand::Value(ValueExpr::Path(p)) => {
                     assert_eq!(p.segments.len(), 5);
                     assert_eq!(p.segments[3], PathSegment::Index(0));
                 }
@@ -319,8 +569,8 @@ mod tests {
         let cond =
             parse_condition(&format!("message.payload.items[{}].name == \"test\"", idx)).unwrap();
         match cond {
-            Condition::Comparison(c) => match &c.left {
-                Operand::Path(p) => {
+            Condition::Expr(expr) => match &as_comparison(&expr).left {
+                Operand::Value(ValueExpr::Path(p)) => {
                     assert_eq!(p.segments[3], PathSegment::Index(usize::MAX));
                 }
                 _ => panic!("expected path"),
@@ -331,7 +581,9 @@ mod tests {
 
     #[test]
     fn trailing_content_is_error() {
-        assert!(parse_condition("message.payload.ok == true && message.payload.x").is_err());
+        // `&&` is now valid grammar — use content the grammar genuinely has
+        // no production for.
+        assert!(parse_condition("message.payload.ok == true } extra").is_err());
     }
 
     #[test]
@@ -343,11 +595,254 @@ mod tests {
     fn negated_numbers_parse() {
         let cond = parse_condition("message.payload.temp < -5").unwrap();
         match cond {
-            Condition::Comparison(c) => match &c.right {
-                Operand::Literal(Literal::Number(n)) => assert_eq!(*n, -5.0),
+            Condition::Expr(expr) => match &as_comparison(&expr).right {
+                Operand::Value(ValueExpr::Number(n)) => assert_eq!(*n, -5.0),
                 _ => panic!("expected negative number"),
             },
             _ => panic!("expected comparison"),
+        }
+    }
+
+    // --- new grammar: boolean combinators ---
+
+    #[test]
+    fn and_combinator_parses() {
+        let cond =
+            parse_condition("message.payload.a > 0 && message.payload.b > 0").unwrap();
+        match cond {
+            Condition::Expr(BoolExpr::And(_, _)) => {}
+            other => panic!("expected And, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn or_combinator_parses() {
+        let cond =
+            parse_condition("message.payload.a > 0 || message.payload.b > 0").unwrap();
+        match cond {
+            Condition::Expr(BoolExpr::Or(_, _)) => {}
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn not_binds_tighter_than_and() {
+        // !a && b  =>  And(Not(a), b)
+        let cond =
+            parse_condition("!message.payload.a == true && message.payload.b == true").unwrap();
+        match cond {
+            Condition::Expr(BoolExpr::And(left, _)) => {
+                assert!(matches!(*left, BoolExpr::Not(_)));
+            }
+            other => panic!("expected And(Not(_), _), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn and_binds_tighter_than_or() {
+        // a || b && c  =>  Or(a, And(b, c))
+        let cond = parse_condition(
+            "message.payload.a == true || message.payload.b == true && message.payload.c == true",
+        )
+        .unwrap();
+        match cond {
+            Condition::Expr(BoolExpr::Or(_, right)) => {
+                assert!(matches!(*right, BoolExpr::And(_, _)));
+            }
+            other => panic!("expected Or(_, And(_, _)), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parens_override_precedence() {
+        // (a || b) && c  =>  And(Or(a, b), c)
+        let cond = parse_condition(
+            "(message.payload.a == true || message.payload.b == true) && message.payload.c == true",
+        )
+        .unwrap();
+        match cond {
+            Condition::Expr(BoolExpr::And(left, _)) => {
+                assert!(matches!(*left, BoolExpr::Or(_, _)));
+            }
+            other => panic!("expected And(Or(_, _), _), got {:?}", other),
+        }
+    }
+
+    // --- new grammar: arithmetic ---
+
+    #[test]
+    fn arithmetic_precedence_mul_over_add() {
+        // a + b * c  =>  Add(a, Mul(b, c))
+        let cond = parse_condition("message.payload.a + message.payload.b * 2 > 0").unwrap();
+        match cond {
+            Condition::Expr(expr) => match &as_comparison(&expr).left {
+                Operand::Value(ValueExpr::Add(_, right)) => {
+                    assert!(matches!(**right, ValueExpr::Mul(_, _)));
+                }
+                other => panic!("expected Add(_, Mul(_, _)), got {:?}", other),
+            },
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn subtraction_parses() {
+        let cond = parse_condition("message.payload.subtotal - message.payload.fee > 0").unwrap();
+        match cond {
+            Condition::Expr(expr) => match &as_comparison(&expr).left {
+                Operand::Value(ValueExpr::Sub(_, _)) => {}
+                other => panic!("expected Sub, got {:?}", other),
+            },
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn division_parses() {
+        let cond = parse_condition("message.payload.a / message.payload.b > 0").unwrap();
+        match cond {
+            Condition::Expr(expr) => match &as_comparison(&expr).left {
+                Operand::Value(ValueExpr::Div(_, _)) => {}
+                other => panic!("expected Div, got {:?}", other),
+            },
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    // --- new grammar: built-in functions ---
+
+    #[test]
+    fn length_function_parses() {
+        let cond = parse_condition("length(message.payload.items) > 0").unwrap();
+        match cond {
+            Condition::Expr(expr) => match &as_comparison(&expr).left {
+                Operand::Value(ValueExpr::Call(FuncName::Length, _)) => {}
+                other => panic!("expected Call(Length, _), got {:?}", other),
+            },
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn abs_function_parses() {
+        let cond = parse_condition("abs(message.payload.delta) < 1").unwrap();
+        match cond {
+            Condition::Expr(expr) => match &as_comparison(&expr).left {
+                Operand::Value(ValueExpr::Call(FuncName::Abs, _)) => {}
+                other => panic!("expected Call(Abs, _), got {:?}", other),
+            },
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn lower_and_upper_functions_parse() {
+        let lower = parse_condition("lower(message.payload.status) == \"paid\"").unwrap();
+        match lower {
+            Condition::Expr(expr) => match &as_comparison(&expr).left {
+                Operand::Value(ValueExpr::Call(FuncName::Lower, _)) => {}
+                other => panic!("expected Call(Lower, _), got {:?}", other),
+            },
+            _ => panic!("expected comparison"),
+        }
+        let upper = parse_condition("upper(message.payload.status) == \"PAID\"").unwrap();
+        match upper {
+            Condition::Expr(expr) => match &as_comparison(&expr).left {
+                Operand::Value(ValueExpr::Call(FuncName::Upper, _)) => {}
+                other => panic!("expected Call(Upper, _), got {:?}", other),
+            },
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn unknown_function_name_is_rejected() {
+        assert!(parse_condition("now(message.payload.x) > 0").is_err());
+    }
+
+    // --- new grammar: defined() ---
+
+    #[test]
+    fn defined_expr_parses() {
+        let cond = parse_condition("defined(message.payload.discountCode)").unwrap();
+        match cond {
+            Condition::Expr(BoolExpr::Defined(path)) => {
+                assert_eq!(path.segments.len(), 3); // message, payload, discountCode
+            }
+            other => panic!("expected Defined, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn defined_combines_with_and() {
+        let cond = parse_condition(
+            "defined(message.payload.discountCode) && message.payload.amount > 0",
+        )
+        .unwrap();
+        assert!(matches!(cond, Condition::Expr(BoolExpr::And(_, _))));
+    }
+
+    // --- new grammar: explicit quantifiers ---
+
+    #[test]
+    fn explicit_any_quantifier_parses() {
+        let cond = parse_condition(
+            "any(message.payload.items, message.payload.items[*].qty > 0)",
+        )
+        .unwrap();
+        match cond {
+            Condition::Expr(BoolExpr::Quantifier(q)) => {
+                assert_eq!(q.kind, QuantifierKind::Any);
+            }
+            other => panic!("expected Quantifier(Any), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn explicit_all_quantifier_parses() {
+        let cond = parse_condition(
+            "all(message.payload.items, message.payload.items[*].qty > 0)",
+        )
+        .unwrap();
+        match cond {
+            Condition::Expr(BoolExpr::Quantifier(q)) => {
+                assert_eq!(q.kind, QuantifierKind::All);
+            }
+            other => panic!("expected Quantifier(All), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn quantifier_inner_expression_rejects_combinators() {
+        // The inner test is exactly a `comparison`, not a `bool-expr` — it
+        // MUST NOT contain `&&`/`||`/`!` (spec §6.4).
+        assert!(parse_condition(
+            "any(message.payload.items, message.payload.items[*].qty > 0 && true)"
+        )
+        .is_err());
+    }
+
+    // --- operand-count ceiling (rule V-206 groundwork) ---
+
+    #[test]
+    fn count_operands_counts_comparison_leaves() {
+        let cond = parse_condition(
+            "message.payload.a > 0 && message.payload.b > 0 && message.payload.c > 0",
+        )
+        .unwrap();
+        match cond {
+            Condition::Expr(expr) => assert_eq!(count_operands(&expr), 6),
+            _ => panic!("expected expr"),
+        }
+    }
+
+    #[test]
+    fn count_operands_counts_nested_arithmetic() {
+        // a + b * c > 0  => operands: a, b, c, 0  (four leaves)
+        let cond = parse_condition("message.payload.a + message.payload.b * 2 > 0").unwrap();
+        match cond {
+            Condition::Expr(expr) => assert_eq!(count_operands(&expr), 4),
+            _ => panic!("expected expr"),
         }
     }
 }

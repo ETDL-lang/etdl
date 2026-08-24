@@ -1,0 +1,83 @@
+etdl: "1.0.0"
+info:
+  title: "Extended ECEL grammar compile check"
+  version: "1.0.0"
+  domain: "PaymentsContext"
+  description: "Exercises the extended ECEL grammar (boolean combinators, arithmetic, built-in functions, defined(), and message.headers.* access) end to end, proving the generated Rust actually compiles — not just that it parses/type-checks."
+
+components:
+  messages:
+    PaymentRequest:
+      name: PaymentRequest
+      payload:
+        type: object
+        required: [amountCents, currency]
+        properties:
+          amountCents:
+            type: integer
+          feeCents:
+            type: integer
+          currency:
+            type: string
+          discountCode:
+            type: string
+      headers:
+        type: object
+        properties:
+          traceId:
+            type: string
+          apiVersion:
+            type: string
+
+eventTrees:
+  ExtendedGuardCheck:
+    initiatingEvent:
+      id: PaymentRequested
+      message: "#/components/messages/PaymentRequest"
+      next: CompoundGuardBarrier
+
+    nodes:
+      CompoundGuardBarrier:
+        type: barrier
+        description: "Boolean combinators (&&) plus an arithmetic expression."
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.amountCents > 0 && message.payload.amountCents - message.payload.feeCents > 0"
+            probability: 0.9
+            next: FunctionAndDefinedBarrier
+          - outcome: FAILURE
+            condition: "default"
+            probability: 0.1
+            next: SendConsequence
+
+      FunctionAndDefinedBarrier:
+        type: barrier
+        description: "A built-in function (lower) and defined() on an optional payload field."
+        branches:
+          - outcome: SUCCESS
+            condition: "lower(message.payload.currency) == \"usd\" || defined(message.payload.discountCode)"
+            probability: 0.7
+            next: HeadersBarrier
+          - outcome: FAILURE
+            condition: "default"
+            probability: 0.3
+            next: SendConsequence
+
+      HeadersBarrier:
+        type: barrier
+        description: "The actual bug fix: message.headers.* used to emit direct field access on Option<serde_json::Value>, which cannot compile."
+        branches:
+          - outcome: SUCCESS
+            condition: "message.headers.traceId != null && message.headers.apiVersion == \"2\""
+            probability: 0.5
+            next: SendConsequence
+          - outcome: FAILURE
+            condition: "default"
+            probability: 0.5
+            next: SendConsequence
+
+      SendConsequence:
+        type: consequence
+        operation: send
+        channel: "payments-events"
+        message: "#/components/messages/PaymentRequest"

@@ -129,12 +129,7 @@ impl AsyncApiRegistry {
         path_segments: &[crate::ecel::PathSegment],
     ) -> Result<Option<Value>, String> {
         let message_value = self.resolve(ext_ref)?;
-
-        let payload_schema = message_value
-            .get("payload")
-            .or_else(|| message_value.get("schema"));
-
-        let Some(schema) = payload_schema else {
+        let Some(schema) = root_schema_for_path(message_value, path_segments) else {
             return Ok(None);
         };
 
@@ -191,16 +186,103 @@ impl AsyncApiRegistry {
         path_segments: &[crate::ecel::PathSegment],
     ) -> Result<Option<Value>, String> {
         let message_value = self.resolve_message(doc, msg_ref)?;
-
-        let payload_schema = message_value
-            .get("payload")
-            .or_else(|| message_value.get("schema"));
-
-        let Some(schema) = payload_schema else {
+        let Some(schema) = root_schema_for_path(&message_value, path_segments) else {
             return Ok(None);
         };
 
         Ok(resolve_schema_path(schema, path_segments))
+    }
+
+    /// Whether the terminal field of `path_segments` is listed in its
+    /// enclosing JSON Schema's `required` array — ordinary JSON Schema
+    /// semantics, used by ECEL's `defined()` (spec §6.4.1) to distinguish
+    /// "always present" (advisory: `defined()` on it is trivially `true`)
+    /// from "may be absent at runtime". Returns `None` if the path itself
+    /// doesn't resolve at all (a distinct, compile-time-error case — V-208
+    /// — handled by the caller via `get_schema_for_message_ref` returning
+    /// `None`, not by this method).
+    pub fn is_path_required(
+        &self,
+        doc: &EtlDocument,
+        msg_ref: &MessageRef,
+        path_segments: &[crate::ecel::PathSegment],
+    ) -> Result<Option<bool>, String> {
+        let message_value = self.resolve_message(doc, msg_ref)?;
+        let Some(root) = root_schema_for_path(&message_value, path_segments) else {
+            return Ok(None);
+        };
+        // Strip the same "message"/"payload"/"headers" root markers
+        // `resolve_schema_path` strips, to get to the real property chain.
+        let mut real_segments = path_segments;
+        while let Some(crate::ecel::PathSegment::Field(name)) = real_segments.first() {
+            if name == "message" || name == "payload" || name == "headers" {
+                real_segments = &real_segments[1..];
+            } else {
+                break;
+            }
+        }
+        if real_segments.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(is_required_along_path(root, real_segments)))
+    }
+}
+
+/// Picks the `payload` or `headers` root schema for a path, based on the
+/// segment immediately after `message` (spec §6.3: those are the only two
+/// root paths in scope). Falls back to `payload`/`schema` when the second
+/// segment is absent or unrecognized, preserving prior behavior for
+/// malformed/legacy call sites.
+fn root_schema_for_path<'a>(
+    message_value: &'a Value,
+    path_segments: &[crate::ecel::PathSegment],
+) -> Option<&'a Value> {
+    let second = path_segments.get(1).and_then(|seg| match seg {
+        crate::ecel::PathSegment::Field(name) => Some(name.as_str()),
+        _ => None,
+    });
+    match second {
+        Some("headers") => message_value.get("headers"),
+        _ => message_value
+            .get("payload")
+            .or_else(|| message_value.get("schema")),
+    }
+}
+
+/// Recursively checks whether every segment of `segments` is listed in its
+/// immediately-enclosing schema's `required` array. A `[*]`/index/quoted-key
+/// segment is always "required" in this sense (array elements and quoted
+/// keys have no `required`-array concept of their own) — only named `.field`
+/// segments off an `object` schema can be optional.
+fn is_required_along_path(schema: &Value, segments: &[crate::ecel::PathSegment]) -> bool {
+    let Some(first) = segments.first() else {
+        return true;
+    };
+    match first {
+        crate::ecel::PathSegment::Field(name) => {
+            let required = schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(name.as_str())));
+            if !required {
+                return false;
+            }
+            match resolve_field(schema, name) {
+                Some(field_schema) if segments.len() > 1 => {
+                    is_required_along_path(&field_schema, &segments[1..])
+                }
+                _ => true,
+            }
+        }
+        crate::ecel::PathSegment::Wildcard | crate::ecel::PathSegment::Index(_) => {
+            match resolve_array_items(schema) {
+                Some(items_schema) if segments.len() > 1 => {
+                    is_required_along_path(&items_schema, &segments[1..])
+                }
+                _ => true,
+            }
+        }
+        crate::ecel::PathSegment::QuotedKey(_) => true,
     }
 }
 
@@ -225,21 +307,24 @@ fn resolve_schema_path(schema: &Value, segments: &[crate::ecel::PathSegment]) ->
 
     match first {
         crate::ecel::PathSegment::Field(name) => {
-            // `message` and `payload` are root markers, not real fields:
-            // `get_schema_for_path` (the only caller) already unwraps the
-            // message envelope down to its payload schema before calling
-            // this function, so `schema` here already *is* what
-            // `message.payload` denotes. Without stripping `payload` too,
-            // every `message.payload.<field>` path (the standard ECEL
-            // root — see `docs/reference/cli.md`/§6.3) tried to resolve a
-            // literal field named `payload` inside the payload schema,
-            // which essentially never exists, so this always returned
-            // `None` -> the caller treated the type as `Unknown` ->
-            // V-204 type-checking silently never fired for any path
-            // operand. `message.headers.<field>` is not fixed by this —
-            // header schema introspection is a separate, already-known,
-            // documented gap (`docs/SPEC_IMPLEMENTATION_MATRIX.md` §6.3).
-            if (name == "message" || name == "payload") && segments.len() > 1 {
+            // `message`, `payload`, and `headers` are root markers, not
+            // real fields: `root_schema_for_path` (the caller's caller)
+            // already unwraps the message envelope down to the correct
+            // root schema — payload or headers, chosen by the segment
+            // right after `message` — before this function ever runs, so
+            // `schema` here already *is* what `message.payload` (or
+            // `message.headers`) denotes. Without stripping both marker
+            // segments, every `message.payload.<field>` / `message.headers.
+            // <field>` path (the two ECEL roots — spec §6.3) tried to
+            // resolve a literal field named `payload`/`headers` inside the
+            // already-unwrapped schema, which essentially never exists, so
+            // this always returned `None` -> the caller treated the type as
+            // `Unknown` -> V-204 type-checking silently never fired for any
+            // path operand. (`headers` parity was the second half of this
+            // fix — previously only `payload` was stripped here at all.)
+            if (name == "message" || name == "payload" || name == "headers")
+                && segments.len() > 1
+            {
                 return resolve_schema_path(schema, &segments[1..]);
             }
 

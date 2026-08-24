@@ -11,6 +11,22 @@ pub struct RustCodeGenerator {
     pub version: String,
 }
 
+/// Everything condition/path codegen needs beyond the immediate node being
+/// rendered: the document (for cross-references), the fault-tree
+/// probabilities, the AsyncAPI registry (schema lookups for `length()`'s
+/// array-vs-string choice and `message.headers.*` coercion), and the
+/// enclosing tree's initiating message reference — ECEL only ever sees
+/// "the message that triggered the tree" (spec §6.1/§6.3), a single
+/// reference constant for the whole handler function being generated.
+/// Bundled to avoid a 6+ positional-parameter signature on every codegen
+/// function in this recursive call chain.
+struct CodegenCtx<'a> {
+    doc: &'a EtlDocument,
+    fault_tree_probs: &'a BTreeMap<String, f64>,
+    registry: &'a AsyncApiRegistry,
+    message_ref: &'a etdl_parser::ast::MessageRef,
+}
+
 impl Default for RustCodeGenerator {
     fn default() -> Self {
         Self::new()
@@ -34,7 +50,7 @@ impl CodeGenerator for RustCodeGenerator {
         &self,
         doc: &EtlDocument,
         fault_tree_probs: &BTreeMap<String, f64>,
-        _registry: &AsyncApiRegistry,
+        registry: &AsyncApiRegistry,
         stem: &str,
         _diagnostics: &mut Vec<Diagnostic>,
     ) -> Result<Vec<GeneratedFile>, String> {
@@ -58,7 +74,13 @@ impl CodeGenerator for RustCodeGenerator {
         output.push_str(&constants);
 
         for tree in doc.event_trees.values() {
-            let handler_code = generate_event_tree_handler(doc, tree, fault_tree_probs)?;
+            let ctx = CodegenCtx {
+                doc,
+                fault_tree_probs,
+                registry,
+                message_ref: &tree.initiating_event.message,
+            };
+            let handler_code = generate_event_tree_handler(&ctx, tree)?;
             output.push_str(&handler_code);
             output.push('\n');
         }
@@ -156,11 +178,7 @@ fn find_fault_tree_prob(
     fault_tree_probs.get(&ft_id).map(|&v| (ft_id.clone(), v))
 }
 
-fn generate_event_tree_handler(
-    doc: &EtlDocument,
-    tree: &EventTree,
-    fault_tree_probs: &BTreeMap<String, f64>,
-) -> Result<String, String> {
+fn generate_event_tree_handler(ctx: &CodegenCtx, tree: &EventTree) -> Result<String, String> {
     let mut output = String::new();
 
     let fn_name = format!("handle_{}", to_snake_case(&tree.initiating_event.id));
@@ -183,7 +201,7 @@ fn generate_event_tree_handler(
     ));
 
     let start_node_id = &tree.initiating_event.next;
-    let body = generate_node_code(doc, tree, start_node_id, 1, fault_tree_probs, &monitor_name)?;
+    let body = generate_node_code(ctx, tree, start_node_id, 1, &monitor_name)?;
     output.push_str(&body);
 
     output.push_str("    Ok(())\n");
@@ -207,11 +225,10 @@ fn find_first_barrier(tree: &EventTree) -> Option<&str> {
 }
 
 fn generate_node_code(
-    doc: &EtlDocument,
+    ctx: &CodegenCtx,
     tree: &EventTree,
     node_id: &str,
     depth: usize,
-    fault_tree_probs: &BTreeMap<String, f64>,
     monitor_name: &str,
 ) -> Result<String, String> {
     let node = tree
@@ -220,35 +237,20 @@ fn generate_node_code(
         .ok_or_else(|| format!("node '{}' not found", node_id))?;
 
     match node {
-        Node::Barrier(barrier) => generate_barrier_code(
-            tree,
-            node_id,
-            barrier,
-            depth,
-            doc,
-            fault_tree_probs,
-            monitor_name,
-        ),
-        Node::Operation(op) => generate_operation_code(
-            tree,
-            node_id,
-            op,
-            depth,
-            doc,
-            fault_tree_probs,
-            monitor_name,
-        ),
+        Node::Barrier(barrier) => {
+            generate_barrier_code(ctx, tree, node_id, barrier, depth, monitor_name)
+        }
+        Node::Operation(op) => generate_operation_code(ctx, tree, node_id, op, depth, monitor_name),
         Node::Consequence(cons) => generate_consequence_code(cons, depth),
     }
 }
 
 fn generate_barrier_code(
+    ctx: &CodegenCtx,
     tree: &EventTree,
     node_id: &str,
     barrier: &etdl_parser::ast::Barrier,
     depth: usize,
-    doc: &EtlDocument,
-    fault_tree_probs: &BTreeMap<String, f64>,
     monitor_name: &str,
 ) -> Result<String, String> {
     let indent = "    ".repeat(depth);
@@ -257,27 +259,20 @@ fn generate_barrier_code(
     for (i, branch) in barrier.branches.iter().enumerate() {
         if i == 0 {
             if branch.condition == Condition::Default {
-                let prob = get_branch_prob(branch, node_id, fault_tree_probs);
+                let prob = get_branch_prob(branch, node_id, ctx.fault_tree_probs);
                 if let Some(p) = prob {
                     output.push_str(&format!(
                         "{}    {}.record_branch(\"{}\", {:.6});\n",
                         indent, monitor_name, branch.outcome, p
                     ));
                 }
-                let body = generate_node_code(
-                    doc,
-                    tree,
-                    &branch.next,
-                    depth + 1,
-                    fault_tree_probs,
-                    monitor_name,
-                )?;
+                let body = generate_node_code(ctx, tree, &branch.next, depth + 1, monitor_name)?;
                 output.push_str(&body);
             } else {
-                let cond = condition_to_rust_code(&branch.condition);
+                let cond = condition_to_rust_code(ctx, &branch.condition);
                 output.push_str(&format!("{}if {} {{\n", indent, cond));
 
-                let prob = get_branch_prob(branch, node_id, fault_tree_probs);
+                let prob = get_branch_prob(branch, node_id, ctx.fault_tree_probs);
                 if let Some(p) = prob {
                     output.push_str(&format!(
                         "{}    {}.record_branch(\"{}\", {:.6});\n",
@@ -285,21 +280,14 @@ fn generate_barrier_code(
                     ));
                 }
 
-                let body = generate_node_code(
-                    doc,
-                    tree,
-                    &branch.next,
-                    depth + 1,
-                    fault_tree_probs,
-                    monitor_name,
-                )?;
+                let body = generate_node_code(ctx, tree, &branch.next, depth + 1, monitor_name)?;
                 output.push_str(&body);
                 output.push_str(&format!("{}}}", indent));
             }
         } else if branch.condition == Condition::Default {
             output.push_str(" else {\n");
 
-            let prob = get_branch_prob(branch, node_id, fault_tree_probs);
+            let prob = get_branch_prob(branch, node_id, ctx.fault_tree_probs);
             if let Some(p) = prob {
                 output.push_str(&format!(
                     "{}    {}.record_branch(\"{}\", {:.6});\n",
@@ -307,21 +295,14 @@ fn generate_barrier_code(
                 ));
             }
 
-            let body = generate_node_code(
-                doc,
-                tree,
-                &branch.next,
-                depth + 1,
-                fault_tree_probs,
-                monitor_name,
-            )?;
+            let body = generate_node_code(ctx, tree, &branch.next, depth + 1, monitor_name)?;
             output.push_str(&body);
             output.push_str(&format!("{}}}\n", indent));
         } else {
-            let cond = condition_to_rust_code(&branch.condition);
+            let cond = condition_to_rust_code(ctx, &branch.condition);
             output.push_str(&format!(" else if {} {{\n", cond));
 
-            let prob = get_branch_prob(branch, node_id, fault_tree_probs);
+            let prob = get_branch_prob(branch, node_id, ctx.fault_tree_probs);
             if let Some(p) = prob {
                 output.push_str(&format!(
                     "{}    {}.record_branch(\"{}\", {:.6});\n",
@@ -329,14 +310,7 @@ fn generate_barrier_code(
                 ));
             }
 
-            let body = generate_node_code(
-                doc,
-                tree,
-                &branch.next,
-                depth + 1,
-                fault_tree_probs,
-                monitor_name,
-            )?;
+            let body = generate_node_code(ctx, tree, &branch.next, depth + 1, monitor_name)?;
             output.push_str(&body);
             output.push_str(&format!("{}}}", indent));
         }
@@ -346,12 +320,11 @@ fn generate_barrier_code(
 }
 
 fn generate_operation_code(
+    ctx: &CodegenCtx,
     tree: &EventTree,
     node_id: &str,
     op: &etdl_parser::ast::Operation,
     depth: usize,
-    doc: &EtlDocument,
-    fault_tree_probs: &BTreeMap<String, f64>,
     monitor_name: &str,
 ) -> Result<String, String> {
     let indent = "    ".repeat(depth);
@@ -400,7 +373,7 @@ fn generate_operation_code(
     if op.on_failure.is_some() {
         if let Some(ref ps) = op.on_failure_probability_source {
             let const_name = to_upper_snake(&format!("{}_failure_probability", node_id));
-            let prob_exists = find_fault_tree_prob(ps, fault_tree_probs).is_some();
+            let prob_exists = find_fault_tree_prob(ps, ctx.fault_tree_probs).is_some();
             if prob_exists {
                 output.push_str(&format!(
                     "{}        {}.record_success(\"{}\", Some({}));\n",
@@ -421,15 +394,8 @@ fn generate_operation_code(
             emit_send(cons, "_result", &indent, &mut output);
         }
         Some(_) => {
-            generate_node_code(
-                doc,
-                tree,
-                &op.next,
-                depth + 2,
-                fault_tree_probs,
-                monitor_name,
-            )
-            .map(|body| output.push_str(&body))?;
+            generate_node_code(ctx, tree, &op.next, depth + 2, monitor_name)
+                .map(|body| output.push_str(&body))?;
         }
         None => {}
     }
@@ -441,7 +407,7 @@ fn generate_operation_code(
 
         if let Some(ref ps) = op.on_failure_probability_source {
             let const_name = to_upper_snake(&format!("{}_failure_probability", node_id));
-            let prob_exists = find_fault_tree_prob(ps, fault_tree_probs).is_some();
+            let prob_exists = find_fault_tree_prob(ps, ctx.fault_tree_probs).is_some();
             if prob_exists {
                 output.push_str(&format!(
                     "{}        {}.record_failure(\"{}\", &err, Some({}));\n",
@@ -466,15 +432,8 @@ fn generate_operation_code(
                 emit_send(cons, "message", &indent, &mut output);
             }
             _ => {
-                generate_node_code(
-                    doc,
-                    tree,
-                    on_failure_id,
-                    depth + 2,
-                    fault_tree_probs,
-                    monitor_name,
-                )
-                .map(|body| output.push_str(&body))?;
+                generate_node_code(ctx, tree, on_failure_id, depth + 2, monitor_name)
+                    .map(|body| output.push_str(&body))?;
             }
         }
 
@@ -539,91 +498,120 @@ fn generate_consequence_code(
     Ok(output)
 }
 
-fn condition_to_rust_code(condition: &Condition) -> String {
+fn condition_to_rust_code(ctx: &CodegenCtx, condition: &Condition) -> String {
     match condition {
         Condition::Default => "true".to_string(),
-        Condition::Comparison(cmp) => {
-            use ecel::Comparator as C;
-            match cmp.op {
-                // `in` and `matches` lower to etdl_core::condition helpers.
-                C::In => {
-                    let left = path_or_literal(&cmp.left);
-                    let right = array_or_literal(&cmp.right);
-                    format!("etdl_core::condition::contains(&{}, &{})", right, left)
-                }
-                C::Matches => {
-                    // `etdl_core::condition::matches` takes `value: &str`.
-                    // A path operand renders as a bare owned-field
-                    // expression (e.g. `message.payload.status`, typically
-                    // `String`); it must be borrowed (`&message.payload.
-                    // status`) so `&String -> &str` deref coercion applies
-                    // at the call site — passing it unborrowed was a type
-                    // error (`expected &str, found String`). A literal
-                    // operand (`ECEL §6.5` says the left side of `matches`
-                    // should be a path, but codegen stays defensive here)
-                    // already renders as a `&'static str` literal and must
-                    // NOT be re-borrowed.
-                    let left = match &cmp.left {
-                        ecel::Operand::Path(_) => format!("&{}", operand_to_path_expr(&cmp.left)),
-                        ecel::Operand::Literal(lit) => literal_to_val_str(lit),
-                    };
-                    let right = literal_to_val_str(&literal_of(&cmp.right));
-                    format!("etdl_core::condition::matches({}, {})", left, right)
-                }
-                _ => {
-                    let (left_path, has_wildcard) = build_path_expression(&cmp.left);
-                    let right = operand_to_val_str(&cmp.right);
-                    let op = comparator_str(&cmp.op);
+        Condition::Expr(expr) => render_bool_expr(ctx, expr),
+    }
+}
 
-                    if has_wildcard {
-                        // Wildcard path on the left: quantify over the array.
-                        format!(
-                            "{}.iter().all(|item| item{} {} {})",
-                            left_path.path_prefix, left_path.remaining_path, op, right
-                        )
-                    } else {
-                        let l = if left_path.path_prefix.is_empty()
-                            && left_path.remaining_path.is_empty()
-                        {
-                            operand_to_val_str(&cmp.left)
-                        } else {
-                            left_path.path_prefix + &left_path.remaining_path
-                        };
-                        let r = if right.is_empty() {
-                            operand_to_path_expr(&cmp.right)
-                        } else {
-                            right
-                        };
-                        format!("{} {} {}", l, op, r)
-                    }
-                }
+fn render_bool_expr(ctx: &CodegenCtx, expr: &ecel::BoolExpr) -> String {
+    use ecel::BoolExpr as B;
+    match expr {
+        B::And(a, b) => format!(
+            "({}) && ({})",
+            render_bool_expr(ctx, a),
+            render_bool_expr(ctx, b)
+        ),
+        B::Or(a, b) => format!(
+            "({}) || ({})",
+            render_bool_expr(ctx, a),
+            render_bool_expr(ctx, b)
+        ),
+        B::Not(a) => format!("!({})", render_bool_expr(ctx, a)),
+        B::Comparison(cmp) => render_comparison(ctx, cmp),
+        B::Quantifier(q) => render_quantifier(ctx, q),
+        B::Defined(path) => render_defined(path),
+    }
+}
+
+/// Which of ECEL's two root paths (spec §6.3) a `message.*` path resolves
+/// under — decided purely syntactically (the segment right after
+/// `message`), never requiring schema access.
+enum PathRoot {
+    Payload,
+    Headers,
+}
+
+fn path_root(path: &ecel::PathExpr) -> PathRoot {
+    match path.segments.get(1) {
+        Some(ecel::PathSegment::Field(name)) if name == "headers" => PathRoot::Headers,
+        _ => PathRoot::Payload,
+    }
+}
+
+fn path_has_wildcard(path: &ecel::PathExpr) -> bool {
+    path.segments
+        .iter()
+        .any(|s| matches!(s, ecel::PathSegment::Wildcard))
+}
+
+/// A hint for which concrete Rust primitive a headers value should coerce
+/// to, inferred from the comparator's other operand (a literal's type, or a
+/// built-in function's known argument/result type) — never from schema
+/// access, unlike payload paths (which don't need coercion at all: they're
+/// already concretely typed Rust struct fields).
+#[derive(Clone, Copy)]
+enum ScalarHint {
+    /// Numeric, but the concrete Rust type is ambiguous (could be `i64` or
+    /// `f64` depending on the schema) — leave a literal operand as a bare,
+    /// untyped-integer token and let Rust infer its type from context,
+    /// exactly like the pre-existing (unhinted) behavior.
+    Number,
+    /// Numeric *and* guaranteed to be a concrete `f64` at this point
+    /// (an arithmetic result, `abs()`, `length()`, or a headers scalar) —
+    /// a literal operand on the other side of the comparison must render
+    /// as an explicit `f64` literal, or `f64 > <untyped-int-literal>`
+    /// fails to compile (Rust never coerces between numeric types).
+    NumberF64,
+    String,
+    Bool,
+    Unknown,
+}
+
+fn operand_scalar_hint(operand: &ecel::Operand) -> ScalarHint {
+    use ecel::{Literal as L, ValueExpr as V};
+    match operand {
+        ecel::Operand::Literal(L::Number(_)) => ScalarHint::Number,
+        ecel::Operand::Literal(L::String(_)) => ScalarHint::String,
+        ecel::Operand::Literal(L::Bool(_)) => ScalarHint::Bool,
+        ecel::Operand::Value(V::Number(_)) => ScalarHint::Number,
+        ecel::Operand::Value(V::Add(_, _))
+        | ecel::Operand::Value(V::Sub(_, _))
+        | ecel::Operand::Value(V::Mul(_, _))
+        | ecel::Operand::Value(V::Div(_, _)) => ScalarHint::NumberF64,
+        ecel::Operand::Value(V::Call(func, _)) => match func {
+            ecel::FuncName::Length | ecel::FuncName::Abs => ScalarHint::NumberF64,
+            ecel::FuncName::Lower | ecel::FuncName::Upper => ScalarHint::String,
+        },
+        ecel::Operand::Value(V::Path(path)) if matches!(path_root(path), PathRoot::Headers) => {
+            ScalarHint::Unknown
+        }
+        _ => ScalarHint::Unknown,
+    }
+}
+
+/// Payload-only: direct Rust struct-field access (`message.payload.foo.bar`,
+/// snake_cased) — unchanged from the pre-existing, well-tested behavior.
+/// Never called on a headers-rooted path (those go through
+/// `render_headers_chain`/`render_headers_scalar` instead, since `headers`
+/// stays an untyped `Option<serde_json::Value>` regardless of which kind of
+/// Message Reference produced `message` — see the codegen implementation
+/// plan's Context section).
+fn render_payload_path(path: &ecel::PathExpr) -> String {
+    let mut out = String::from("message");
+    for seg in path.segments.iter().skip(1) {
+        match seg {
+            ecel::PathSegment::Field(name) => {
+                out.push('.');
+                out.push_str(&to_snake_case(name));
             }
+            ecel::PathSegment::Wildcard => {}
+            ecel::PathSegment::Index(idx) => out.push_str(&format!("[{}]", idx)),
+            ecel::PathSegment::QuotedKey(name) => out.push_str(&format!("[\"{}\"]", name)),
         }
     }
-}
-
-/// Render a path operand (or literal) as an expression usable as the left side
-/// of a helper call.
-fn path_or_literal(operand: &ecel::Operand) -> String {
-    match operand {
-        ecel::Operand::Path(_) => operand_to_path_expr(operand),
-        ecel::Operand::Literal(lit) => literal_to_val_str(lit),
-    }
-}
-
-/// Render an array path or array literal for the right side of `in`.
-fn array_or_literal(operand: &ecel::Operand) -> String {
-    match operand {
-        ecel::Operand::Path(_) => operand_to_path_expr(operand),
-        ecel::Operand::Literal(lit) => literal_to_val_str(lit),
-    }
-}
-
-fn literal_of(operand: &ecel::Operand) -> ecel::Literal {
-    match operand {
-        ecel::Operand::Literal(lit) => lit.clone(),
-        ecel::Operand::Path(_) => ecel::Literal::String(String::new()),
-    }
+    out
 }
 
 struct PathParts {
@@ -631,109 +619,371 @@ struct PathParts {
     remaining_path: String,
 }
 
-fn build_path_expression(operand: &ecel::Operand) -> (PathParts, bool) {
-    match operand {
-        ecel::Operand::Path(path_expr) => {
-            let segments = &path_expr.segments;
-            let mut pre_wildcard = Vec::new();
-            let mut post_wildcard = Vec::new();
-            let mut has_wildcard = false;
+/// Payload-only wildcard-aware path split (segments before/after the first
+/// `[*]`), for quantification codegen (`.iter().any/all(...)`, spec §6.4).
+fn build_payload_path_parts(path: &ecel::PathExpr) -> PathParts {
+    let segments = &path.segments;
+    let mut pre_wildcard = Vec::new();
+    let mut post_wildcard = Vec::new();
+    let mut has_wildcard = false;
 
-            for (i, seg) in segments.iter().enumerate() {
-                if i == 0 {
-                    continue;
-                }
-                if has_wildcard {
-                    post_wildcard.push(seg.clone());
-                } else if matches!(seg, ecel::PathSegment::Wildcard) {
-                    has_wildcard = true;
-                } else {
-                    pre_wildcard.push(seg.clone());
-                }
-            }
-
-            let mut prefix = String::from("message");
-            for seg in &pre_wildcard {
-                match seg {
-                    ecel::PathSegment::Field(name) => {
-                        prefix.push('.');
-                        prefix.push_str(&to_snake_case(name));
-                    }
-                    ecel::PathSegment::Index(idx) => {
-                        prefix.push_str(&format!("[{}]", idx));
-                    }
-                    ecel::PathSegment::QuotedKey(name) => {
-                        prefix.push_str(&format!("[\"{}\"]", name));
-                    }
-                    _ => {}
-                }
-            }
-
-            let mut suffix = String::new();
-            for seg in &post_wildcard {
-                match seg {
-                    ecel::PathSegment::Field(name) => {
-                        suffix.push('.');
-                        suffix.push_str(&to_snake_case(name));
-                    }
-                    ecel::PathSegment::Index(idx) => {
-                        suffix.push_str(&format!("[{}]", idx));
-                    }
-                    ecel::PathSegment::QuotedKey(name) => {
-                        suffix.push_str(&format!("[\"{}\"]", name));
-                    }
-                    _ => {}
-                }
-            }
-
-            (
-                PathParts {
-                    path_prefix: prefix,
-                    remaining_path: suffix,
-                },
-                has_wildcard,
-            )
+    for (i, seg) in segments.iter().enumerate() {
+        if i == 0 {
+            continue;
         }
-        ecel::Operand::Literal(_) => (
-            PathParts {
-                path_prefix: String::new(),
-                remaining_path: String::new(),
-            },
-            false,
+        if has_wildcard {
+            post_wildcard.push(seg.clone());
+        } else if matches!(seg, ecel::PathSegment::Wildcard) {
+            has_wildcard = true;
+        } else {
+            pre_wildcard.push(seg.clone());
+        }
+    }
+
+    let mut prefix = String::from("message");
+    for seg in &pre_wildcard {
+        match seg {
+            ecel::PathSegment::Field(name) => {
+                prefix.push('.');
+                prefix.push_str(&to_snake_case(name));
+            }
+            ecel::PathSegment::Index(idx) => prefix.push_str(&format!("[{}]", idx)),
+            ecel::PathSegment::QuotedKey(name) => prefix.push_str(&format!("[\"{}\"]", name)),
+            _ => {}
+        }
+    }
+
+    let mut suffix = String::new();
+    for seg in &post_wildcard {
+        match seg {
+            ecel::PathSegment::Field(name) => {
+                suffix.push('.');
+                suffix.push_str(&to_snake_case(name));
+            }
+            ecel::PathSegment::Index(idx) => suffix.push_str(&format!("[{}]", idx)),
+            ecel::PathSegment::QuotedKey(name) => suffix.push_str(&format!("[\"{}\"]", name)),
+            _ => {}
+        }
+    }
+
+    PathParts {
+        path_prefix: prefix,
+        remaining_path: suffix,
+    }
+}
+
+/// Builds a `message.headers.as_ref().and_then(|v| v.get("field").cloned())...`
+/// chain for a headers-rooted path, yielding `Option<serde_json::Value>`.
+/// Uses each segment's *original* name (never snake_cased) — this indexes a
+/// runtime JSON object by its real key, not a Rust struct field.
+fn render_headers_chain(path: &ecel::PathExpr) -> String {
+    let mut expr = String::from("message.headers.as_ref()");
+    for seg in path.segments.iter().skip(2) {
+        let key = match seg {
+            ecel::PathSegment::Field(name) | ecel::PathSegment::QuotedKey(name) => {
+                format!("\"{}\"", name)
+            }
+            ecel::PathSegment::Index(idx) => idx.to_string(),
+            ecel::PathSegment::Wildcard => continue,
+        };
+        expr = format!("{}.and_then(|v| v.get({}).cloned())", expr, key);
+    }
+    expr
+}
+
+/// Coerces a headers chain to a concrete Rust scalar, defaulting on absence
+/// — this is the actual bug fix: `message.headers.*` previously rendered as
+/// direct field access (`message.headers.trace_id`), which cannot compile
+/// since `headers` is `Option<serde_json::Value>`, not a struct.
+fn render_headers_scalar(path: &ecel::PathExpr, hint: ScalarHint) -> String {
+    let chain = render_headers_chain(path);
+    match hint {
+        ScalarHint::Number | ScalarHint::NumberF64 => {
+            format!("({}.and_then(|v| v.as_f64())).unwrap_or(0.0)", chain)
+        }
+        ScalarHint::Bool => format!("({}.and_then(|v| v.as_bool())).unwrap_or(false)", chain),
+        // `Value::as_str()` returns `Option<&str>` borrowed from its
+        // receiver — since the chain above `.cloned()`s at every hop, that
+        // receiver is a value owned by the `and_then` closure itself, so a
+        // borrow from it can't escape the closure (E0515). Cloning into an
+        // owned `String` sidesteps that; comparing an owned `String`
+        // against a `&str` literal still works directly via `PartialEq`.
+        ScalarHint::String | ScalarHint::Unknown => format!(
+            "({}.and_then(|v| v.as_str().map(|s| s.to_string()))).unwrap_or_default()",
+            chain
         ),
     }
 }
 
-fn operand_to_path_expr(operand: &ecel::Operand) -> String {
-    match operand {
-        ecel::Operand::Path(path) => {
-            let segments = &path.segments;
-            let mut out = String::from("message");
-            for seg in segments.iter().skip(1) {
-                match seg {
-                    ecel::PathSegment::Field(name) => {
-                        out.push('.');
-                        out.push_str(&to_snake_case(name));
-                    }
-                    ecel::PathSegment::Wildcard => {}
-                    ecel::PathSegment::Index(idx) => {
-                        out.push_str(&format!("[{}]", idx));
-                    }
-                    ecel::PathSegment::QuotedKey(name) => {
-                        out.push_str(&format!("[\"{}\"]", name));
-                    }
-                }
-            }
-            out
-        }
-        ecel::Operand::Literal(_) => String::new(),
+/// `== null` / `!= null` against a headers path can't reuse the payload
+/// `Option<T> != None` trick (headers values are `serde_json::Value`, where
+/// "absent" and "explicitly JSON null" are different runtime states) —
+/// treat both as "is null" here, consistent with `defined()` (spec §6.4.1)
+/// being the construct that actually distinguishes the two.
+fn render_headers_null_test(path: &ecel::PathExpr, negate: bool) -> String {
+    let is_null = format!(
+        "({}).map(|v| v.is_null()).unwrap_or(true)",
+        render_headers_chain(path)
+    );
+    if negate {
+        format!("!({})", is_null)
+    } else {
+        is_null
     }
 }
 
-fn operand_to_val_str(operand: &ecel::Operand) -> String {
+/// `defined(path)` (spec §6.4.1). For headers, the `.get()` chain already
+/// carries presence information directly (`.is_some()`). For payload, a
+/// field may be a required (non-`Option`) Rust type or an `Option<T>` one
+/// depending on the schema — rather than needing schema access to pick
+/// between `.is_some()` and a literal `true`, round-trip the whole payload
+/// through `serde_json` once: that erases the `Option<T>`-vs-`T` distinction
+/// uniformly (a required field always serializes present-and-non-null; an
+/// absent optional one does not), so one code shape is correct either way.
+fn render_defined(path: &ecel::PathExpr) -> String {
+    match path_root(path) {
+        PathRoot::Headers => format!("({}).is_some()", render_headers_chain(path)),
+        PathRoot::Payload => {
+            let mut expr = String::from("serde_json::to_value(&message.payload).ok()");
+            for seg in path.segments.iter().skip(2) {
+                let key = match seg {
+                    ecel::PathSegment::Field(name) | ecel::PathSegment::QuotedKey(name) => {
+                        format!("\"{}\"", name)
+                    }
+                    ecel::PathSegment::Index(idx) => idx.to_string(),
+                    ecel::PathSegment::Wildcard => continue,
+                };
+                expr = format!("{}.and_then(|v| v.get({}).cloned())", expr, key);
+            }
+            format!("({}).is_some_and(|v| !v.is_null())", expr)
+        }
+    }
+}
+
+fn render_quantifier(ctx: &CodegenCtx, q: &ecel::QuantifierExpr) -> String {
+    // The inner comparison's `[*]` refers to the quantified array (spec
+    // §6.4) — reuse the same wildcard-split machinery a bare comparison's
+    // implicit-`all` case already uses, just parameterized on `any`/`all`.
+    if let ecel::Operand::Value(ecel::ValueExpr::Path(path_expr)) = &q.comparison.left {
+        if path_has_wildcard(path_expr) && matches!(path_root(path_expr), PathRoot::Payload) {
+            let parts = build_payload_path_parts(path_expr);
+            let right = render_operand(ctx, &q.comparison.right, ScalarHint::Number);
+            let op = comparator_str(&q.comparison.op);
+            let method = match q.kind {
+                ecel::QuantifierKind::Any => "any",
+                ecel::QuantifierKind::All => "all",
+            };
+            return format!(
+                "{}.iter().{}(|item| item{} {} {})",
+                parts.path_prefix, method, parts.remaining_path, op, right
+            );
+        }
+    }
+    // No wildcard where the grammar expects one — a validly type-checked
+    // document (spec §6.4) never reaches this; degrade to the plain
+    // comparison rather than emitting nonsense.
+    render_comparison(ctx, &q.comparison)
+}
+
+fn render_comparison(ctx: &CodegenCtx, cmp: &ecel::Comparison) -> String {
+    use ecel::Comparator as C;
+
+    if matches!(cmp.op, C::Eq | C::Neq) {
+        if let (ecel::Operand::Value(ecel::ValueExpr::Path(path)), ecel::Operand::Literal(ecel::Literal::Null)) =
+            (&cmp.left, &cmp.right)
+        {
+            if matches!(path_root(path), PathRoot::Headers) {
+                return render_headers_null_test(path, matches!(cmp.op, C::Neq));
+            }
+        }
+    }
+
+    match cmp.op {
+        // `in` and `matches` lower to etdl_core::condition helpers.
+        C::In => {
+            let left = render_operand(ctx, &cmp.left, ScalarHint::Unknown);
+            let right = render_operand(ctx, &cmp.right, ScalarHint::Unknown);
+            format!("etdl_core::condition::contains(&{}, &{})", right, left)
+        }
+        C::Matches => {
+            // `etdl_core::condition::matches` takes `value: &str`. A path
+            // (payload or headers) renders as an owned `String` expression
+            // — a payload field directly (typically `String`), a headers
+            // path via `render_headers_scalar`'s owned-`String` coercion
+            // (§ its own doc comment: `Value::as_str()` borrows from a
+            // value the chain already owns, so it clones to `String`
+            // instead) — either way it must be borrowed (`&expr`) so
+            // `&String -> &str` deref coercion applies at the call site. A
+            // literal already renders as a `&'static str` and must NOT be
+            // re-borrowed.
+            let left = match &cmp.left {
+                ecel::Operand::Value(ecel::ValueExpr::Path(path)) => {
+                    let rendered = match path_root(path) {
+                        PathRoot::Payload => render_payload_path(path),
+                        PathRoot::Headers => render_headers_scalar(path, ScalarHint::String),
+                    };
+                    format!("&{}", rendered)
+                }
+                _ => render_operand(ctx, &cmp.left, ScalarHint::String),
+            };
+            let right = render_operand(ctx, &cmp.right, ScalarHint::String);
+            format!("etdl_core::condition::matches({}, {})", left, right)
+        }
+        _ => {
+            if let ecel::Operand::Value(ecel::ValueExpr::Path(path_expr)) = &cmp.left {
+                if path_has_wildcard(path_expr) && matches!(path_root(path_expr), PathRoot::Payload)
+                {
+                    // Wildcard path on the left: quantify over the array
+                    // (implicit universal quantification, spec §6.4).
+                    let parts = build_payload_path_parts(path_expr);
+                    let right = render_operand(ctx, &cmp.right, ScalarHint::Number);
+                    let op = comparator_str(&cmp.op);
+                    return format!(
+                        "{}.iter().all(|item| item{} {} {})",
+                        parts.path_prefix, parts.remaining_path, op, right
+                    );
+                }
+            }
+            let left_hint = operand_scalar_hint(&cmp.right);
+            let right_hint = operand_scalar_hint(&cmp.left);
+            let l = render_operand(ctx, &cmp.left, left_hint);
+            let r = render_operand(ctx, &cmp.right, right_hint);
+            let op = comparator_str(&cmp.op);
+            format!("{} {} {}", l, op, r)
+        }
+    }
+}
+
+fn render_operand(ctx: &CodegenCtx, operand: &ecel::Operand, hint: ScalarHint) -> String {
     match operand {
-        ecel::Operand::Path(_) => "".to_string(),
+        // A bare numeric literal renders as an untyped-integer token by
+        // default, letting Rust infer its type from context (`i64`, `f64`,
+        // ...) — but when the *other* side is a guaranteed-`f64` value
+        // (arithmetic, `abs()`, `length()`), that inference fails
+        // (`f64 > 0` doesn't compile: Rust never coerces between numeric
+        // types), so an explicit `f64` literal is required here instead.
+        ecel::Operand::Literal(ecel::Literal::Number(n)) if matches!(hint, ScalarHint::NumberF64) => {
+            format!("{}f64", n)
+        }
+        ecel::Operand::Value(v) => render_value_expr(ctx, v, hint),
         ecel::Operand::Literal(lit) => literal_to_val_str(lit),
+    }
+}
+
+fn render_value_expr(ctx: &CodegenCtx, expr: &ecel::ValueExpr, hint: ScalarHint) -> String {
+    use ecel::{FuncName as F, ValueExpr as V};
+    match expr {
+        V::Path(path) => match path_root(path) {
+            PathRoot::Payload => render_payload_path(path),
+            PathRoot::Headers => render_headers_scalar(path, hint),
+        },
+        V::Number(n) if matches!(hint, ScalarHint::NumberF64) => format!("{}f64", n),
+        V::Number(n) => n.to_string(),
+        V::Call(func, arg) => {
+            let arg_hint = match func {
+                F::Abs => ScalarHint::NumberF64,
+                F::Lower | F::Upper => ScalarHint::String,
+                F::Length => ScalarHint::Unknown,
+            };
+            // A function's argument is used as a bare method-call receiver
+            // (`(<arg>).abs()`, `(<arg>).to_ascii_lowercase()`, ...), which
+            // an `Option<T>` payload field can't be — unlike a plain
+            // comparison operand (unaffected, pre-existing behavior), this
+            // needs unwrapping.
+            let arg_code = match arg.as_ref() {
+                V::Path(path) if matches!(path_root(path), PathRoot::Payload) => {
+                    render_payload_scalar(ctx, path)
+                }
+                _ => render_value_expr(ctx, arg, arg_hint),
+            };
+            match func {
+                F::Length => render_length_call(ctx, arg, &arg_code),
+                F::Abs => format!("({}).abs()", arg_code),
+                F::Lower => format!("({}).to_ascii_lowercase()", arg_code),
+                F::Upper => format!("({}).to_ascii_uppercase()", arg_code),
+            }
+        }
+        V::Add(a, b) => format!("(({}) + ({}))", as_f64_expr(ctx, a), as_f64_expr(ctx, b)),
+        V::Sub(a, b) => format!("(({}) - ({}))", as_f64_expr(ctx, a), as_f64_expr(ctx, b)),
+        V::Mul(a, b) => format!("(({}) * ({}))", as_f64_expr(ctx, a), as_f64_expr(ctx, b)),
+        V::Div(a, b) => format!("(({}) / ({}))", as_f64_expr(ctx, a), as_f64_expr(ctx, b)),
+    }
+}
+
+/// A payload path rendered as a concrete (never `Option`-wrapped) value —
+/// for use as an arithmetic leaf or a function-call receiver, neither of
+/// which compile against `Option<T>`. Checks the resolved schema's
+/// `required` array (via the same `is_path_required` built for `defined()`
+/// in the schema-resolution pass) and defaults an absent optional field to
+/// its type's `Default` (`0`/`0.0` for numbers, `""` for strings) — ECEL's
+/// type system has no distinct "nullable number" (§6.7), so this is the
+/// same "absent numeric input contributes nothing" convention the
+/// reliability crate already uses elsewhere in this codebase, not a new
+/// invention. An unresolvable path (registry lookup failure) is treated as
+/// required/non-optional, preserving the pre-existing direct-access
+/// behavior rather than guessing.
+fn render_payload_scalar(ctx: &CodegenCtx, path: &ecel::PathExpr) -> String {
+    let base = render_payload_path(path);
+    let is_optional = ctx
+        .registry
+        .is_path_required(ctx.doc, ctx.message_ref, &path.segments)
+        .ok()
+        .flatten()
+        == Some(false);
+    if is_optional {
+        format!("{}.clone().unwrap_or_default()", base)
+    } else {
+        base
+    }
+}
+
+/// Renders any `value-expr` as an `f64`-typed Rust expression. Every
+/// arithmetic leaf goes through this (spec §6.5's `+`/`-`/`*`/`/`) so an
+/// `i64` payload field (JSON `integer`) and an `f64` one (JSON `number`)
+/// combine without a Rust type mismatch — ECEL's type system unifies both
+/// as one `Number` runtime type (§6.7); Rust needs one concrete type
+/// picked to actually add them, so arithmetic always computes in `f64`.
+/// This only casts *inside* an arithmetic sub-tree — a bare `path-expr`/
+/// `number` operand with no arithmetic operator (`render_value_expr`,
+/// called everywhere else) is untouched, so ordinary, non-arithmetic
+/// comparison codegen keeps generating exactly what it always has.
+fn as_f64_expr(ctx: &CodegenCtx, expr: &ecel::ValueExpr) -> String {
+    use ecel::ValueExpr as V;
+    match expr {
+        V::Number(n) => format!("{}f64", n),
+        V::Path(path) if matches!(path_root(path), PathRoot::Payload) => {
+            format!("({} as f64)", render_payload_scalar(ctx, path))
+        }
+        V::Path(_) => render_value_expr(ctx, expr, ScalarHint::Number),
+        V::Call(_, _) => render_value_expr(ctx, expr, ScalarHint::Number),
+        V::Add(a, b) => format!("(({}) + ({}))", as_f64_expr(ctx, a), as_f64_expr(ctx, b)),
+        V::Sub(a, b) => format!("(({}) - ({}))", as_f64_expr(ctx, a), as_f64_expr(ctx, b)),
+        V::Mul(a, b) => format!("(({}) * ({}))", as_f64_expr(ctx, a), as_f64_expr(ctx, b)),
+        V::Div(a, b) => format!("(({}) / ({}))", as_f64_expr(ctx, a), as_f64_expr(ctx, b)),
+    }
+}
+
+/// `length()`'s result depends on whether its argument is a `string`
+/// (UTF-8 codepoint count, spec §6.5.1 — not Rust `.len()`'s byte count) or
+/// an `array` (element count). Resolving that needs a schema lookup — the
+/// one place in this module that still consults `ctx.registry` — for a
+/// non-payload or unresolvable argument, default to the string form.
+fn render_length_call(ctx: &CodegenCtx, arg: &ecel::ValueExpr, arg_code: &str) -> String {
+    let is_array = match arg {
+        ecel::ValueExpr::Path(path) if matches!(path_root(path), PathRoot::Payload) => ctx
+            .registry
+            .get_schema_for_message_ref(ctx.doc, ctx.message_ref, &path.segments)
+            .ok()
+            .flatten()
+            .and_then(|schema| schema.get("type").and_then(|t| t.as_str().map(String::from)))
+            .as_deref()
+            == Some("array"),
+        _ => false,
+    };
+    if is_array {
+        format!("({}.len() as f64)", arg_code)
+    } else {
+        format!("({}.chars().count() as f64)", arg_code)
     }
 }
 
@@ -1123,13 +1373,37 @@ faultTrees:
         assert!(!constants.contains("faultTrees.A.topEvent"));
     }
 
+    /// A minimal, schema-free fixture for condition-codegen tests: none of
+    /// them exercise `length()` on a payload path (the one place codegen
+    /// still consults `ctx.registry`), so an empty registry and an
+    /// unresolvable message reference are fine — every other rendering
+    /// path in this module is purely syntactic.
+    fn test_fixture() -> (EtlDocument, BTreeMap<String, f64>, AsyncApiRegistry, etdl_parser::ast::MessageRef)
+    {
+        let doc = multi_ft_doc();
+        let probs = BTreeMap::new();
+        let registry = AsyncApiRegistry::new();
+        let message_ref = etdl_parser::ast::MessageRef::Internal(etdl_parser::ast::InternalRef {
+            pointer: "#/components/messages/Test".to_string(),
+        });
+        (doc, probs, registry, message_ref)
+    }
+
+    fn render(condition_src: &str) -> String {
+        let cond = etdl_parser::ecel::parse_condition(condition_src).unwrap();
+        let (doc, probs, registry, message_ref) = test_fixture();
+        let ctx = CodegenCtx {
+            doc: &doc,
+            fault_tree_probs: &probs,
+            registry: &registry,
+            message_ref: &message_ref,
+        };
+        condition_to_rust_code(&ctx, &cond)
+    }
+
     #[test]
     fn in_operator_lowers_to_contains() {
-        let cond = etdl_parser::ecel::parse_condition(
-            "message.payload.status in [\"PAID\", \"AUTHORIZED\"]",
-        )
-        .unwrap();
-        let code = condition_to_rust_code(&cond);
+        let code = render("message.payload.status in [\"PAID\", \"AUTHORIZED\"]");
         assert!(
             code.contains("etdl_core::condition::contains"),
             "got: {}",
@@ -1140,11 +1414,7 @@ faultTrees:
 
     #[test]
     fn matches_operator_lowers_to_regex() {
-        let cond = etdl_parser::ecel::parse_condition(
-            "message.payload.reference matches \"^ORD-[0-9]{8}$\"",
-        )
-        .unwrap();
-        let code = condition_to_rust_code(&cond);
+        let code = render("message.payload.reference matches \"^ORD-[0-9]{8}$\"");
         assert!(
             code.contains("etdl_core::condition::matches"),
             "got: {}",
@@ -1154,8 +1424,123 @@ faultTrees:
 
     #[test]
     fn comparison_emits_valid_rust() {
-        let cond = etdl_parser::ecel::parse_condition("message.payload.amount >= 10000").unwrap();
-        let code = condition_to_rust_code(&cond);
+        let code = render("message.payload.amount >= 10000");
         assert_eq!(code, "message.payload.amount >= 10000");
+    }
+
+    // --- new grammar: boolean combinators ---
+
+    #[test]
+    fn and_lowers_to_rust_ampersand() {
+        let code = render("message.payload.a > 0 && message.payload.b > 0");
+        assert_eq!(
+            code,
+            "(message.payload.a > 0) && (message.payload.b > 0)"
+        );
+    }
+
+    #[test]
+    fn or_lowers_to_rust_pipe() {
+        let code = render("message.payload.a > 0 || message.payload.b > 0");
+        assert_eq!(
+            code,
+            "(message.payload.a > 0) || (message.payload.b > 0)"
+        );
+    }
+
+    #[test]
+    fn not_lowers_to_rust_bang() {
+        let code = render("!(message.payload.ok == true)");
+        assert_eq!(code, "!(message.payload.ok == true)");
+    }
+
+    // --- new grammar: arithmetic ---
+
+    #[test]
+    fn arithmetic_casts_to_f64() {
+        let code = render("message.payload.subtotal - message.payload.discount > 0");
+        assert_eq!(
+            code,
+            "(((message.payload.subtotal as f64)) - ((message.payload.discount as f64))) > 0f64"
+        );
+    }
+
+    // --- new grammar: built-in functions ---
+
+    #[test]
+    fn abs_lowers_to_method_call() {
+        let code = render("abs(message.payload.delta) < 1");
+        assert_eq!(code, "(message.payload.delta).abs() < 1f64");
+    }
+
+    #[test]
+    fn lower_lowers_to_ascii_method() {
+        let code = render("lower(message.payload.status) == \"paid\"");
+        assert_eq!(
+            code,
+            "(message.payload.status).to_ascii_lowercase() == \"paid\""
+        );
+    }
+
+    // --- new grammar: defined() ---
+
+    #[test]
+    fn defined_on_payload_round_trips_through_json() {
+        let code = render("defined(message.payload.discountCode)");
+        assert!(code.contains("serde_json::to_value(&message.payload)"));
+        assert!(code.contains("\"discountCode\""));
+        assert!(code.contains("is_some_and"));
+    }
+
+    #[test]
+    fn defined_on_headers_checks_the_get_chain() {
+        let code = render("defined(message.headers.traceId)");
+        assert_eq!(
+            code,
+            "(message.headers.as_ref().and_then(|v| v.get(\"traceId\").cloned())).is_some()"
+        );
+    }
+
+    // --- the actual bug fix: message.headers.* used to emit direct field
+    // access (`message.headers.trace_id`), which cannot compile since
+    // `headers` is `Option<serde_json::Value>`, not a struct. ---
+
+    #[test]
+    fn headers_comparison_does_not_emit_direct_field_access() {
+        let code = render("message.headers.traceId != null");
+        assert!(
+            !code.contains("message.headers.trace_id"),
+            "regressed to direct-field-access codegen: {}",
+            code
+        );
+        assert!(code.contains("message.headers.as_ref()"), "got: {}", code);
+    }
+
+    #[test]
+    fn headers_string_comparison_coerces_via_as_str() {
+        let code = render("message.headers.apiVersion == \"2\"");
+        assert!(code.contains(".as_str()"), "got: {}", code);
+        assert!(code.contains("\"apiVersion\""), "got: {}", code);
+    }
+
+    #[test]
+    fn headers_null_check_treats_absent_as_null() {
+        let code = render("message.headers.traceId != null");
+        assert!(code.contains("is_null()"), "got: {}", code);
+        assert!(code.starts_with("!("), "expected negated null-test, got: {}", code);
+    }
+
+    // --- explicit quantifiers reuse the wildcard `.iter()` machinery ---
+
+    #[test]
+    fn explicit_any_lowers_to_iter_any() {
+        let code = render("any(message.payload.items, message.payload.items[*].qty > 0)");
+        assert!(code.contains(".iter().any(|item|"), "got: {}", code);
+    }
+
+    #[test]
+    fn explicit_all_lowers_to_iter_all() {
+        let code = render("all(message.payload.items, message.payload.items[*].qty > 0)");
+        assert!(code.contains(".iter().all(|item|"), "got: {}", code);
     }
 }
