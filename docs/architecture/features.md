@@ -88,16 +88,24 @@ reliability = ["dep:etdl-reliability-core"]
 
 ```toml
 [features]
-default = ["reliability", "discovery"]
-reliability = ["etdl-compiler/reliability", "dep:etdl-reliability-core"]
+default = ["reliability", "discovery", "target-java", "target-python", "target-go", "target-dotnet"]
+reliability = ["etdl-compiler/reliability", "dep:etdl-reliability-core", "dep:etdl-reliability", "etdl-conformance/reliability"]
 discovery = ["dep:etdl-failure-discovery", "dep:etdl-reliability-ontology"]
+plugins = ["etdl-compiler/plugins", "dep:ureq"]
 ```
 
-- **Default** CLI: reliability compilation built in (the normal experience) and
-  `etdl discover` available.
-- **`--no-default-features`**: minimal CLI — no reliability, no discovery.
+- **Default** CLI: reliability compilation built in (the normal experience),
+  `etdl discover` available, and all four language `--target`s available.
+- **`--no-default-features`**: minimal CLI — no reliability, no discovery, no
+  extra targets, no plugins.
 - **`--features discovery`**: add source-code failure discovery and the
   ontology crate.
+- **`--features plugins`**: dynamically load third-party supplements as
+  sandboxed `.wasm` modules (`etdl supplement install/list/remove`) —
+  **not** in `default`, unlike every feature above, because it pulls in
+  `wasmtime` (a full Cranelift JIT), a much heavier dependency than
+  anything else this binary optionally links. See
+  [Supplement Plugins](../reference/supplement-plugins.md).
 
 Requests for a capability that is not compiled in produce a clear message (for
 example `etdl discover` without the `discovery` feature) and exit non-zero.
@@ -120,8 +128,10 @@ filesystem or OS dependencies, so the WASM target stays clean.
 | C | `cargo check -p etdl-reliability` | optional reliability library |
 | D | `cargo check -p etdl-cli --no-default-features --features discovery` | ETDL + failure discovery |
 | E | `cargo check -p etdl-reliability-ontology` | ontology |
-| F | `cargo check --workspace --all-features` | everything |
+| F | `cargo check --workspace --all-features` | everything, including `plugins` (dynamic `.wasm` supplement plugins) |
 | G | `cargo check -p etdl-wasm --target wasm32-unknown-unknown` | WASM-compatible set |
+| H | `cargo check -p etdl-conformance --no-default-features` | conformance suite, lean (no reliability) |
+| I | `cargo check -p etdl-cli --no-default-features` | CLI, fully lean (no features at all) |
 
 ## Reproducibility
 

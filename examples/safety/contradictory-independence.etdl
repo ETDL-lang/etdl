@@ -1,0 +1,89 @@
+# E-132 counter-example, derived from hazard-demo.etdl: RetryBarrier and
+# FallbackBarrier mutually declare `independentOf` each other (each lists
+# the other's id) while sharing the SAME commonCauseGroup
+# ("primary-network-path") — a self-contradictory independence claim per
+# ETDL-Safety-Supplement.md Section 5's E-132. In hazard-demo.etdl the two
+# barriers sit on genuinely different network paths (different
+# commonCauseGroup) and validate cleanly; only the commonCauseGroup value
+# differs between the two files.
+#
+#   etdl validate contradictory-independence.etdl
+#   -> [ERROR] E-132: x-safety: barriers fallback-gateway-barrier,
+#      retry-barrier mutually claim independentOf each other but share
+#      commonCauseGroup 'primary-network-path' — self-contradictory
+
+etdl: "1.0.0"
+info:
+  title: "Order Fulfillment (Safety Demo)"
+  version: "1.0.0"
+  domain: "FulfillmentContext"
+
+supplements:
+  - id: etdl.safety
+    version: "1.0"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent:
+      id: OrderPlacedTrigger
+      message: "api#/components/messages/OrderPlaced"
+      next: RetryBarrier
+    nodes:
+      RetryBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.gatewayReachable == true"
+            probability: 0.95
+            next: ProcessPaymentOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.05
+            next: FallbackBarrier
+      FallbackBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.gatewayReachable == true"
+            probability: 0.5
+            next: ProcessPaymentOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.5
+            next: PaymentFailedConsequence
+      ProcessPaymentOperation:
+        type: operation
+        action: execute
+        handler: "stripe_charge_handler"
+        next: FulfillmentConsequence
+        onFailure: PaymentFailedConsequence
+      FulfillmentConsequence:
+        type: consequence
+        operation: terminate
+      PaymentFailedConsequence:
+        type: consequence
+        operation: terminate
+
+x-safety:
+  hazards:
+    - id: gateway-unavailable-during-payment
+      description: "payment cannot be captured while the gateway is down"
+      severity: critical
+      likelihood: remote
+      riskIndex: 2
+      consequenceRef: "#/eventTrees/OrderFulfillment/nodes/PaymentFailedConsequence"
+
+  barriers:
+    - id: retry-barrier
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      sil: 2
+      independentOf: ["fallback-gateway-barrier"]
+      commonCauseGroup: "primary-network-path"
+    - id: fallback-gateway-barrier
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/FallbackBarrier"
+      sil: 1
+      independentOf: ["retry-barrier"]
+      commonCauseGroup: "primary-network-path"

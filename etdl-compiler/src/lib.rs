@@ -37,10 +37,14 @@ use etdl_parser::ast::EtlDocument;
 use etdl_parser::asyncapi::AsyncApiRegistry;
 
 pub mod codegen;
+pub mod diagnostics;
 pub mod extension;
 pub mod fault_tree;
+pub mod performance;
 #[cfg(feature = "reliability")]
 pub mod reliability;
+pub mod safety;
+pub mod security;
 pub mod stdlib;
 pub mod tree_event;
 mod typeck;
@@ -49,7 +53,7 @@ pub mod validate;
 pub mod wasm_extension;
 
 pub use codegen::{CodeGenerator, GeneratedFile, RustCodeGenerator};
-pub use extension::{EtdlExtension, ExtensionContext, ExtensionRegistry};
+pub use extension::{EtdlExtension, ExtensionContext, ExtensionRegistry, SupplementDescriptor};
 pub use validate::Diagnostic;
 
 pub struct Compiler {
@@ -59,15 +63,22 @@ pub struct Compiler {
     /// resolve automatically; add optional-library search paths with
     /// [`Compiler::with_library_search_path`].
     pub library_resolver: stdlib::LibraryResolver,
-    /// Extensions registered in addition to the built-in ones (the
-    /// Reliability and Tree Event supplements, handled internally by
-    /// `run_extensions` exactly as before — unaffected by this field).
-    /// This is the entry point a non-core supplement (core spec Section
-    /// 11.4/11.5 — e.g. a third-party `etdl.chain` implementation)
-    /// registers itself through via [`Compiler::with_extension`], so its
-    /// `validate`/`process` (core spec Section 11.3) actually run during
-    /// [`Compiler::compile`]/[`Compiler::validate`], not just something a
-    /// third party could theoretically implement.
+    /// Extensions run through the generic, registry-driven
+    /// `EtdlExtension::validate`/`process` path (`Compiler::run_extensions`).
+    /// The Reliability and Tree Event supplements are *not* here — each has
+    /// its own bespoke, special-cased call elsewhere in this pipeline
+    /// (`run_extensions`'s hard-coded `resolve_reliability` call,
+    /// `validate_with_base`'s direct `tree_event::parse_and_validate_trees`
+    /// call). Every other supplement, built-in or third-party, goes through
+    /// this field instead of getting its own bespoke pipeline code:
+    /// [`Compiler::new`] seeds it with the Performance Supplement (always
+    /// available, like Tree Event, but wired generically rather than
+    /// special-cased — see `performance` module docs), and
+    /// [`Compiler::with_extension`] is the same seam a third-party
+    /// supplement (core spec Section 11.4/11.5 — e.g. a future
+    /// `etdl.chain`) uses to register itself, so its `validate`/`process`
+    /// (core spec Section 11.3) actually run during
+    /// [`Compiler::compile`]/[`Compiler::validate`].
     extensions: Vec<Box<dyn EtdlExtension>>,
 }
 
@@ -119,7 +130,18 @@ impl Compiler {
         Compiler {
             rust_codegen: RustCodeGenerator::new(),
             library_resolver: stdlib::LibraryResolver::new(),
-            extensions: Vec::new(),
+            // The Performance and Safety Supplements have no bespoke
+            // pipeline code of their own (see their module docs) — seeding
+            // them here is the entire "built-in" wiring either gets;
+            // `run_extensions`'s existing generic loop over `extensions`
+            // does the rest, the same as it would for a third-party
+            // `with_extension` caller.
+            extensions: vec![
+                Box::new(performance::PerformanceExtension::new()),
+                Box::new(safety::SafetyExtension::new()),
+                Box::new(diagnostics::DiagnosticsExtension::new()),
+                Box::new(security::SecurityExtension::new()),
+            ],
         }
     }
 

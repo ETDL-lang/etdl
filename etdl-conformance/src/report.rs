@@ -43,6 +43,30 @@ pub fn area_statuses(reliability_available: bool) -> Vec<AreaStatus> {
             status: ConformanceStatus::Pass,
             detail: "etdl-tree-core; domain-neutral, always available".to_string(),
         },
+        AreaStatus {
+            area: "supplement.performance".to_string(),
+            level: Level::Supplement,
+            status: ConformanceStatus::Pass,
+            detail: "etdl-compiler::performance; declarative only, always available".to_string(),
+        },
+        AreaStatus {
+            area: "supplement.safety".to_string(),
+            level: Level::Supplement,
+            status: ConformanceStatus::Pass,
+            detail: "etdl-compiler::safety; no new probability math, always available".to_string(),
+        },
+        AreaStatus {
+            area: "supplement.diagnostics".to_string(),
+            level: Level::Supplement,
+            status: ConformanceStatus::Pass,
+            detail: "etdl-compiler::diagnostics; structural metadata only, always available".to_string(),
+        },
+        AreaStatus {
+            area: "supplement.security".to_string(),
+            level: Level::Supplement,
+            status: ConformanceStatus::Pass,
+            detail: "etdl-compiler::security; depends on etdl.tree-event's parsed trees, always available".to_string(),
+        },
     ];
 
     let reliability_status = if reliability_available {

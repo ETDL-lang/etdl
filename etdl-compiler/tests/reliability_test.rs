@@ -109,7 +109,7 @@ info:
   domain: "D"
 asyncapi_imports: {}
 supplements:
-  - id: etdl.performance
+  - id: etdl.definitely-not-implemented
     version: "1.0"
 eventTrees:
   T:
@@ -157,7 +157,7 @@ info:
   domain: "D"
 asyncapi_imports: {}
 supplements:
-  - id: etdl.safety
+  - id: etdl.definitely-not-implemented
     version: "1.0"
     required: true
 eventTrees:

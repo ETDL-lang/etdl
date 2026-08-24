@@ -118,6 +118,24 @@ etdl compile order-fulfillment.etdl --target rust,java,python,go,dotnet --out-di
 etdl validate order-fulfillment.etdl
 ```
 
+### Install from source
+
+Prefer this over `cargo install` if you want the `plugins` feature (dynamic
+`.wasm` supplements, off by default) or you're building against an unreleased
+change:
+
+```bash
+git clone https://github.com/ETDL-lang/etdl.git
+cd etdl
+cargo build --release -p etdl-cli                    # default features: reliability, discovery, all four language targets
+cargo build --release -p etdl-cli --features plugins  # + etdl supplement install/list/remove
+```
+
+The binary lands at `target/release/etdl`; put it on your `PATH` or invoke
+it directly. `cargo test --workspace` runs the full test suite. See
+[CONTRIBUTING](CONTRIBUTING.md) for the workspace layout, feature flags, and
+how to run the conformance suite.
+
 See [Target Architecture](docs/architecture/targets.md) for how `--target`
 works, which targets are actually implemented today (`rust`, `java`,
 `python`, `go`, `dotnet`), how they all bind to the one Rust runtime
@@ -256,6 +274,7 @@ Conditions on barrier branches are written in ECEL, a typed expression language 
 | `etdl-reliability` | [![Crates.io](https://img.shields.io/crates/v/etdl-reliability.svg)](https://crates.io/crates/etdl-reliability) | Optional richer reliability library: estimates, uncertainty, distributions, evidence, analysis (empirical/Bayesian/sensitivity) |
 | `etdl-reliability-ontology` | [![Crates.io](https://img.shields.io/crates/v/etdl-reliability-ontology.svg)](https://crates.io/crates/etdl-reliability-ontology) | Canonical failure taxonomy, ontology versioning, candidate mappings |
 | `etdl-failure-discovery` | [![Crates.io](https://img.shields.io/crates/v/etdl-failure-discovery.svg)](https://crates.io/crates/etdl-failure-discovery) | Source-code failure discovery producing candidate failure modes |
+| `etdl-supplement-sdk` | [![Crates.io](https://img.shields.io/crates/v/etdl-supplement-sdk.svg)](https://crates.io/crates/etdl-supplement-sdk) | SDK for writing third-party supplement plugins as sandboxed `.wasm` modules — see [Supplement Plugins](docs/reference/supplement-plugins.md) |
 
 ## Reliability layer
 
@@ -278,6 +297,29 @@ candidate failure modes with evidence, source locations, and ontology mapping �
 deterministically and without inventing probabilities. See
 [docs/failure-discovery/README.md](docs/failure-discovery/README.md).
 
+## Supplement plugins
+
+Beyond the two built-in supplements (`reliability`, `discovery`, compiled in
+via Cargo feature flags), `etdl-cli` can dynamically load **third-party
+supplements as sandboxed `.wasm` modules** — no rebuild of `etdl-cli`
+required:
+
+```bash
+etdl supplement install <path-or-https-url>   # checks conformance, then installs
+etdl supplement list                          # built-in extensions + installed plugins
+etdl supplement remove <id>
+```
+
+Requires `etdl-cli` built with the `plugins` feature (off by default — see
+[Install from source](#install-from-source) below). A plugin gets no
+filesystem, network, or clock access and runs under a `wasmtime` fuel
+budget; malformed or misbehaving plugins become an ordinary diagnostic,
+never a host crash. Write one in Rust with
+[`etdl-supplement-sdk`](etdl-supplement-sdk), or in any language that
+compiles to `wasm32-unknown-unknown` against the documented wire ABI — see
+[Supplement Plugins](docs/reference/supplement-plugins.md) for the full
+contract.
+
 ---
 
 ## Documentation
@@ -287,6 +329,7 @@ deterministically and without inventing probabilities. See
 - **[Concepts](docs/concepts/event-trees.md)** — event trees, fault trees, ECEL, probability linking
 - **[Architecture](docs/architecture.md)** — compiler pipeline and codegen contract
 - **[Target Architecture](docs/architecture/targets.md)** — the `CodeGenerator` trait, the `--target` registry, the `java` target, and the roadmap for Go/.NET/JS/TS/Python
+- **[Supplement Plugins](docs/reference/supplement-plugins.md)** — the wire ABI for dynamically loaded, sandboxed `.wasm` supplements
 - **[API docs](https://docs.rs/etdl-core)** — `etdl-core`, `etdl-parser`, `etdl-compiler`
 
 ## Editor support

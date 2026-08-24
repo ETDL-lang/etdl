@@ -449,6 +449,18 @@ impl crate::extension::EtdlExtension for ReliabilityExtension {
         "1.0"
     }
 
+    fn descriptor(&self) -> crate::extension::SupplementDescriptor {
+        crate::extension::SupplementDescriptor {
+            summary: "Resolves external probability sources (`.rprob` artifacts) into fault-tree \
+                      basic-event overrides at build time, with provenance. Richer analysis \
+                      (uncertainty, Monte Carlo, importance, sensitivity) is reported separately \
+                      by `etdl capabilities`, not part of this descriptor.",
+            schema: None,
+            diagnostic_codes: &["E-110", "E-111", "E-112", "W-408"],
+            requires: &[],
+        }
+    }
+
     fn validate(
         &self,
         doc: &EtlDocument,

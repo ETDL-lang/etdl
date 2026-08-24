@@ -1,0 +1,85 @@
+# Safety Supplement demo: one Hazard classified against the Section 4.1
+# risk matrix, and two Safety Barriers (RetryBarrier / FallbackBarrier)
+# each given a Safety Integrity Level. The two barriers declare mutual
+# independentOf each other but sit on genuinely different network paths
+# (different commonCauseGroup), so this document is valid — see
+# contradictory-independence.etdl for the E-132 counter-example. Purely
+# declarative: no new probability math, no runtime enforcement — comment
+# out the `etdl.safety` line under `supplements:` below and re-validate to
+# see that for yourself.
+
+etdl: "1.0.0"
+info:
+  title: "Order Fulfillment (Safety Demo)"
+  version: "1.0.0"
+  domain: "FulfillmentContext"
+
+supplements:
+  - id: etdl.safety
+    version: "1.0"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent:
+      id: OrderPlacedTrigger
+      message: "api#/components/messages/OrderPlaced"
+      next: RetryBarrier
+    nodes:
+      RetryBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.gatewayReachable == true"
+            probability: 0.95
+            next: ProcessPaymentOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.05
+            next: FallbackBarrier
+      FallbackBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.gatewayReachable == true"
+            probability: 0.5
+            next: ProcessPaymentOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.5
+            next: PaymentFailedConsequence
+      ProcessPaymentOperation:
+        type: operation
+        action: execute
+        handler: "stripe_charge_handler"
+        next: FulfillmentConsequence
+        onFailure: PaymentFailedConsequence
+      FulfillmentConsequence:
+        type: consequence
+        operation: terminate
+      PaymentFailedConsequence:
+        type: consequence
+        operation: terminate
+
+x-safety:
+  hazards:
+    - id: gateway-unavailable-during-payment
+      description: "payment cannot be captured while the gateway is down"
+      severity: critical
+      likelihood: remote
+      riskIndex: 2
+      consequenceRef: "#/eventTrees/OrderFulfillment/nodes/PaymentFailedConsequence"
+
+  barriers:
+    - id: retry-barrier
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      sil: 2
+      independentOf: ["fallback-gateway-barrier"]
+      commonCauseGroup: "primary-network-path"
+    - id: fallback-gateway-barrier
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/FallbackBarrier"
+      sil: 1
+      independentOf: ["retry-barrier"]
+      commonCauseGroup: "secondary-network-path"

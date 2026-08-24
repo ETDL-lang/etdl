@@ -1,0 +1,64 @@
+# Diagnostics Supplement demo: one Correlation (a telemetry span
+# attribute/value expected to trace back to a Fault-Tree cause) and one
+# Anomaly Rule (a node worth watching for anomalies). Structural metadata
+# only — no automated correlation, no telemetry ingestion, no runtime
+# behavior change. Comment out the `etdl.diagnostics` line under
+# `supplements:` below and re-validate to see that for yourself.
+
+etdl: "1.0.0"
+info:
+  title: "Order Fulfillment (Diagnostics Demo)"
+  version: "1.0.0"
+  domain: "FulfillmentContext"
+
+supplements:
+  - id: etdl.diagnostics
+    version: "1.0"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent:
+      id: OrderPlacedTrigger
+      message: "api#/components/messages/OrderPlaced"
+      next: ProcessPaymentOperation
+    nodes:
+      ProcessPaymentOperation:
+        type: operation
+        action: execute
+        handler: "stripe_charge_handler"
+        next: FulfillmentConsequence
+        onFailure: PaymentFailedConsequence
+        onFailureProbabilitySource: "#/faultTrees/PaymentGatewayFailure/topEvent"
+      FulfillmentConsequence:
+        type: consequence
+        operation: terminate
+      PaymentFailedConsequence:
+        type: consequence
+        operation: terminate
+
+faultTrees:
+  PaymentGatewayFailure:
+    topEvent:
+      id: PaymentCaptureFailed
+      description: "A charge attempt against the payment gateway does not succeed."
+      rootCause: GatewayUnreachable
+    basicEvents:
+      GatewayUnreachable:
+        description: "Stripe API did not respond within the configured timeout."
+        probability: 0.008
+
+x-diagnostics:
+  correlations:
+    - id: gateway-timeout-correlation
+      spanAttribute: "etdl.node.id"
+      spanValue: "ProcessPaymentOperation"
+      causeRef: "#/faultTrees/PaymentGatewayFailure/basicEvents/GatewayUnreachable"
+      description: "an anomaly on this span most often traces back to gateway unreachability"
+
+  anomalyRules:
+    - id: payment-operation-anomaly
+      monitors: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      description: "watch ETDL_SLA_THRESHOLD/ETDL_SLA_WINDOW on this node's BranchMonitor for elevated failure rate"

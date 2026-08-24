@@ -2495,7 +2495,18 @@ fn cmd_supplement_list(flags: &CliFlags) -> i32 {
         println!(
             "{}",
             serde_json::json!({
-                "builtin": registry.list(),
+                "builtin": registry.list().iter().map(|id| {
+                    let ext = registry.lookup(id).expect("listed");
+                    let d = ext.descriptor();
+                    serde_json::json!({
+                        "id": ext.id(),
+                        "version": ext.version(),
+                        "summary": d.summary,
+                        "schema": d.schema,
+                        "diagnostic_codes": d.diagnostic_codes,
+                        "requires": d.requires,
+                    })
+                }).collect::<Vec<_>>(),
                 "installed": installed,
             })
         );
@@ -2504,7 +2515,13 @@ fn cmd_supplement_list(flags: &CliFlags) -> i32 {
 
     println!("Built-in extensions:");
     for id in registry.list() {
-        println!("  {}", id);
+        let ext = registry.lookup(id).expect("listed");
+        let summary = ext.descriptor().summary;
+        if summary.is_empty() {
+            println!("  {}", id);
+        } else {
+            println!("  {} — {}", id, summary);
+        }
     }
     println!("Installed plugins:");
     if installed.is_empty() {
@@ -2837,6 +2854,10 @@ fn cmd_conformance_manifest(flags: &CliFlags) -> i32 {
         env!("CARGO_PKG_VERSION"),
         reliability,
         etdl_tree_core::TREE_SCHEMA,
+        etdl_compiler::performance::PERFORMANCE_SCHEMA,
+        etdl_compiler::safety::SAFETY_SCHEMA,
+        etdl_compiler::diagnostics::DIAGNOSTICS_SCHEMA,
+        etdl_compiler::security::SECURITY_SCHEMA,
         etdl_probability_core::STD_PROBABILITY_SCHEMA,
         etdl_compiler::stdlib::STDLIB_SCHEMA,
         predictive_reliability_schema(reliability),
@@ -2930,13 +2951,6 @@ fn cmd_capabilities(flags: &CliFlags) -> i32 {
             "distributions": ["bernoulli", "binomial", "beta", "exponential", "normal"],
             "sampling": "unavailable (deterministic math only; see docs/reference/standard-probability-library.md)",
         },
-        "tree_event": {
-            "available": true,
-            "schema": etdl_tree_core::TREE_SCHEMA,
-            "kind": "built-in",
-            "gates": ["AND", "OR", "NOT", "XOR", "K_OF_N"],
-            "structure": "tree (strict single-parent), not a DAG",
-        },
         "runtime_feedback": {
             "available": analysis,
             "observation_dataset": analysis,
@@ -2962,14 +2976,28 @@ fn cmd_capabilities(flags: &CliFlags) -> i32 {
         "conditional_probability_evaluation": false,
         "failure_discovery": discovery,
         "ontology": ontology,
+        // Every built-in supplement extension (`etdl.tree-event`,
+        // `etdl.performance`, `etdl.safety`, `etdl.diagnostics`,
+        // `etdl.security`, and `etdl.reliability` when the `reliability`
+        // feature is on), described by its own `EtdlExtension::descriptor()`
+        // — colocated with each supplement's own validation code
+        // (`etdl-compiler/src/{tree_event,performance,safety,diagnostics,
+        // security,reliability}.rs`), not hand-duplicated here. Adding a
+        // new supplement's `descriptor()` makes it show up here
+        // automatically; nothing in this command needs editing.
         "extensions": registry
             .list()
             .iter()
             .map(|id| {
                 let ext = registry.lookup(id).expect("listed");
+                let d = ext.descriptor();
                 serde_json::json!({
                     "id": ext.id(),
                     "version": ext.version(),
+                    "summary": d.summary,
+                    "schema": d.schema,
+                    "diagnostic_codes": d.diagnostic_codes,
+                    "requires": d.requires,
                 })
             })
             .collect::<Vec<_>>(),
@@ -2991,11 +3019,30 @@ fn cmd_capabilities(flags: &CliFlags) -> i32 {
              exponential, normal; sampling: unavailable (deterministic math only)",
             etdl_probability_core::STD_PROBABILITY_SCHEMA
         );
-        println!(
-            "Generic Tree Event Supplement: available ({}) — gates: AND, OR, NOT, XOR, K_OF_N; \
-             tree (not DAG)",
-            etdl_tree_core::TREE_SCHEMA
-        );
+        // Every built-in supplement extension except `etdl.reliability`
+        // (which gets its own detailed capability breakdown just below,
+        // since its analysis sub-capabilities aren't reducible to a single
+        // descriptor) — described by its own `EtdlExtension::descriptor()`,
+        // colocated with each supplement's own validation code. Adding a
+        // new supplement's `descriptor()` makes it print here
+        // automatically; nothing in this command needs editing.
+        for id in registry.list() {
+            if id == "etdl.reliability" {
+                continue;
+            }
+            let ext = registry.lookup(id).expect("listed");
+            let d = ext.descriptor();
+            let schema = d
+                .schema
+                .map(|s| format!(" ({s})"))
+                .unwrap_or_default();
+            let requires = if d.requires.is_empty() {
+                String::new()
+            } else {
+                format!(" [requires: {}]", d.requires.join(", "))
+            };
+            println!("{}: available{}{} — {}", id, schema, requires, d.summary);
+        }
         if reliability {
             println!("Reliability: built-in");
             println!("Reliability Analysis: available");
@@ -3029,11 +3076,6 @@ fn cmd_capabilities(flags: &CliFlags) -> i32 {
         } else {
             println!("Failure Discovery: unavailable (rebuild with 'discovery')");
             println!("Ontology: unavailable (rebuild with 'discovery')");
-        }
-        println!("Registered extensions:");
-        for id in registry.list() {
-            let ext = registry.lookup(id).expect("listed");
-            println!("  {} @{}", ext.id(), ext.version());
         }
     }
     0

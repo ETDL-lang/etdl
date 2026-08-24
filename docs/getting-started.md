@@ -15,6 +15,23 @@ cargo install etdl-cli
 
 This installs the `etdl` binary with `compile` and `validate` subcommands.
 
+### Alternative: install from a clone
+
+Build from source if you want the `plugins` feature (dynamic, sandboxed
+`.wasm` supplements — off by default in the published crate too, see
+[Supplement Plugins](reference/supplement-plugins.md)) or you're tracking an
+unreleased change:
+
+```bash
+git clone https://github.com/ETDL-lang/etdl.git
+cd etdl
+cargo build --release -p etdl-cli --features plugins
+```
+
+The binary lands at `target/release/etdl`. See
+[CONTRIBUTING](../CONTRIBUTING.md) for the full feature-flag list, workspace
+layout, and how to run the test suite.
+
 ## 2. Write an `.etdl` document
 
 An ETDL document has three parts: `info`, `eventTrees`, and `faultTrees` (plus optional `asyncapi_imports`).
@@ -120,4 +137,5 @@ consumer.on_message::<OrderPlaced>(|msg| async move {
 
 - Read [Event Trees](concepts/event-trees.md) and [Fault Trees](concepts/fault-trees.md) for the full model
 - Follow the annotated [Order Fulfillment example](examples/order-fulfillment.md)
-- See the [CLI reference](reference/cli.md) for all flags
+- See the [CLI reference](CLI.md) for all flags
+- Extend the compiler with a third-party [supplement plugin](reference/supplement-plugins.md) — no rebuild of `etdl-cli` required

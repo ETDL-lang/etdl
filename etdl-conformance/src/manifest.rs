@@ -37,16 +37,42 @@ impl ConformanceManifest {
         implementation_version: &str,
         reliability_available: bool,
         tree_event_schema: &str,
+        performance_schema: &str,
+        safety_schema: &str,
+        diagnostics_schema: &str,
+        security_schema: &str,
         std_probability_schema: &str,
         std_library_schema: &str,
         predictive_reliability_schema: &str,
         reliability_artifact_schema: Option<&str>,
     ) -> Self {
-        let mut supplements = vec![SupplementInfo {
-            id: "etdl.tree-event".to_string(),
-            version: tree_event_schema.to_string(),
-            available: true,
-        }];
+        let mut supplements = vec![
+            SupplementInfo {
+                id: "etdl.tree-event".to_string(),
+                version: tree_event_schema.to_string(),
+                available: true,
+            },
+            SupplementInfo {
+                id: "etdl.performance".to_string(),
+                version: performance_schema.to_string(),
+                available: true,
+            },
+            SupplementInfo {
+                id: "etdl.safety".to_string(),
+                version: safety_schema.to_string(),
+                available: true,
+            },
+            SupplementInfo {
+                id: "etdl.diagnostics".to_string(),
+                version: diagnostics_schema.to_string(),
+                available: true,
+            },
+            SupplementInfo {
+                id: "etdl.security".to_string(),
+                version: security_schema.to_string(),
+                available: true,
+            },
+        ];
         supplements.push(SupplementInfo {
             id: "etdl.reliability".to_string(),
             version: "1.0".to_string(),
@@ -93,6 +119,10 @@ mod tests {
             "0.2.2",
             true,
             "etdl.tree-event/1.0",
+            "etdl.performance/1.0",
+            "etdl.safety/1.0",
+            "etdl.diagnostics/1.0",
+            "etdl.security/1.0",
             "std.probability/1.0",
             "std.library/1.0",
             "etdl.predictive-reliability/1.0",

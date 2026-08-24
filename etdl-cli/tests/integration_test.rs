@@ -732,6 +732,46 @@ faultTrees:
         assert!(stdout.contains("etdl "));
     }
 
+    /// `etdl capabilities`'s `"extensions"` array is generated from
+    /// `EtdlExtension::descriptor()` on every `builtin_registry()` entry
+    /// (`etdl-compiler/src/extension.rs`) — not hand-written per supplement
+    /// in `cmd_capabilities` — so a real end-to-end check that a known
+    /// supplement's descriptor actually reaches CLI JSON output is worth
+    /// more here than in `etdl-compiler`'s own unit tests, which never
+    /// invoke the binary.
+    #[test]
+    fn cli_capabilities_json_reports_supplements_from_their_own_descriptors() {
+        let (out, stdout) = run_cli(&["capabilities", "--json"]);
+        assert_eq!(out.status.code(), Some(0));
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+        let extensions = v["extensions"].as_array().expect("extensions array");
+
+        let performance = extensions
+            .iter()
+            .find(|e| e["id"] == "etdl.performance")
+            .expect("etdl.performance listed");
+        assert!(
+            !performance["summary"].as_str().unwrap_or_default().is_empty(),
+            "expected a non-empty summary sourced from PerformanceExtension::descriptor(), got {performance}"
+        );
+        assert_eq!(performance["schema"], "etdl.performance/1.0");
+        assert!(performance["diagnostic_codes"]
+            .as_array()
+            .expect("diagnostic_codes array")
+            .iter()
+            .any(|c| c == "E-161"));
+
+        let security = extensions
+            .iter()
+            .find(|e| e["id"] == "etdl.security")
+            .expect("etdl.security listed");
+        assert_eq!(
+            security["requires"],
+            serde_json::json!(["etdl.tree-event"]),
+            "expected SecurityExtension::descriptor()'s cross-supplement dependency to surface, got {security}"
+        );
+    }
+
     // --- `--target` selection (spec: "--target as a first-class
     // extensibility mechanism") ---
 

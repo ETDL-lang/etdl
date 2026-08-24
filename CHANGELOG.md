@@ -6,6 +6,152 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
 
 ## [Unreleased]
 
+### Changed — `etdl capabilities`/`etdl supplement list` now derive supplement info from the code, not hand-typed strings
+
+`EtdlExtension` gained a `descriptor()` method returning a
+`SupplementDescriptor { summary, schema, diagnostic_codes, requires }`,
+colocated in each supplement's own module right next to the validation
+logic that actually produces those diagnostic codes (e.g.
+`PerformanceExtension::descriptor()` sits beside `parse_and_validate_budgets`
+in `performance.rs`). Every built-in supplement
+(`etdl.tree-event`/`etdl.performance`/`etdl.safety`/`etdl.diagnostics`/
+`etdl.security`/`etdl.reliability`) implements it.
+
+`etdl-cli`'s `cmd_capabilities` previously hand-duplicated a summary of each
+supplement (name, schema, a hand-picked list of fields) in five separate
+JSON blocks and five separate `println!`s, which had already drifted
+subtly out of sync with the actual `x-*` field names in one case. Both are
+now deleted; `capabilities`'s `"extensions"` JSON array and its
+human-readable output are generated generically by iterating
+`extension::builtin_registry()` and calling `.descriptor()` — a new
+built-in supplement's info appears automatically the moment its
+`descriptor()` is implemented, with no `etdl-cli` change required. Guarded
+by a new test (`extension::tests::every_built_in_extension_has_a_non_empty_descriptor`)
+that fails if a future built-in forgets to override the trait's empty
+default, and an end-to-end CLI test
+(`cli_capabilities_json_reports_supplements_from_their_own_descriptors`)
+proving the real binary's JSON output actually reflects it. `etdl
+supplement list` was enriched the same way.
+
+This is a backward-compatible trait addition (default-empty method) — no
+existing `EtdlExtension` implementor (including dynamically loaded `.wasm`
+plugins via `WasmExtension`, whose wire ABI is unchanged) needs updating.
+
+### Added — Diagnostics and Security Supplements (`etdl.diagnostics`, `etdl.security`)
+
+Two more built-in core supplements, completing implementation of every
+supplement in `etdl-specification/supplements/` (alongside the previously
+shipped `etdl.reliability`, `etdl.tree-event`, `etdl.performance`,
+`etdl.safety`):
+
+- **`etdl.diagnostics`**: declares which telemetry span attribute/value a
+  document's author expects to correlate with which Fault-Tree cause
+  (`x-diagnostics.correlations`), and which nodes are worth monitoring for
+  anomalies (`x-diagnostics.anomalyRules`). Purely structural metadata — no
+  automated correlation, root-cause inference, or telemetry ingestion.
+  Three new diagnostics (`E-150`, `E-151`, `W-412`). See
+  `docs/reference/diagnostics-supplement.md`.
+- **`etdl.security`**: STRIDE-classifies an `etdl.tree-event` attack tree's
+  leaves (`x-security.threatModels`) and maps Controls onto existing core
+  Barrier nodes (`x-security.controls`). **The one built-in supplement with
+  a real cross-supplement dependency** — it reads `etdl.tree-event`'s
+  already-parsed trees directly, and a document declaring `etdl.security`
+  without also declaring `etdl.tree-event` sees every `treeRef` correctly
+  fail to resolve, the practical effect of the dependency without a new
+  generic supplement-dependency-enforcement mechanism. Three new
+  diagnostics (`E-140`, `E-141`, `W-411`). See
+  `docs/reference/security-supplement.md`.
+
+Both are wired exactly like the Performance and Safety Supplements: no
+special-cased direct call in `etdl-compiler/src/lib.rs`, registered instead
+into `Compiler::new()`'s `extensions` list so they run through the same
+generic `EtdlExtension::validate`/`process` path a third-party
+`Compiler::with_extension` supplement uses.
+
+**Also discovered and worth flagging**: `Compiler::compile()`/
+`compile_target()` run every generically-registered extension's
+`validate()`+`process()` **twice** internally (once inside
+`validate_with_base`, again in `prepare()`'s own separate `run_extensions`
+call, to recompute the fault-tree overrides `validate_with_base` doesn't
+return) — a pre-existing pipeline characteristic, not introduced by this
+change, that duplicates any *warning*-level diagnostic (not errors, which
+already short-circuit) an extension produces when going through `compile`
+specifically (`validate` alone is unaffected). Confirmed to affect the
+already-shipped Performance/Safety Supplements too, not just these two.
+Not fixed here — a safe fix touches the shared `prepare`/`validate_with_base`
+pipeline all extensions (including `etdl.reliability`) depend on, a larger
+and riskier change than adding a supplement. Tracked as a follow-up.
+
+### Added — Safety Supplement (`etdl.safety`)
+
+A new built-in core supplement: classifies Hazards against a fixed
+severity x likelihood risk matrix (`ETDL-Safety-Supplement.md` Section
+4.1), and gives existing core Barrier nodes a Safety Integrity Level and
+independence/common-cause declarations, via a document's `x-safety`
+extension field. Defines no new probability mathematics — residual risk is
+read from core's own Fault-Tree evaluation, never recomputed. Four new
+diagnostics (`E-130`, `E-131`, `E-132`, `W-410`); `E-132` (a
+self-contradictory independence claim) is checked by finding barriers
+connected — directly or transitively — through *mutual* `independentOf`
+declarations that also share a common-cause group. See
+`docs/reference/safety-supplement.md` and
+`examples/safety/hazard-demo.etdl`/`contradictory-independence.etdl`.
+
+Wired exactly like the Performance Supplement (see below): registered in
+`extension::builtin_registry()` for discoverability, and separately seeded
+into `Compiler::new()`'s `extensions` list so it runs through the same
+generic `EtdlExtension::validate`/`process` path a third-party
+`Compiler::with_extension` supplement uses, rather than a bespoke direct
+call in `etdl-compiler/src/lib.rs`. A new test
+(`etdl-compiler/tests/safety_wiring_test.rs`) proves both supplements run
+together in one document without their diagnostics interfering.
+
+### Added — Performance Supplement (`etdl.performance`)
+
+A new built-in core supplement: declared latency-percentile budgets
+(`p50Ms`/`p95Ms`/`p99Ms`) and an optional throughput expectation
+(`maxConcurrency`/`expectedRatePerSecond`) against an existing Operation
+node or a whole Event Tree, via a document's `x-performance` extension
+field. Purely declarative — no runtime enforcement, no probability math, no
+effect on generated code; three new diagnostics (`E-160`, `E-161`, `W-413`).
+See `docs/reference/performance-supplement.md` and
+`examples/performance/budget-demo.etdl`.
+
+Unlike the Tree Event and Reliability supplements — each of which has its
+own special-cased direct call inside `Compiler`'s pipeline
+(`etdl-compiler/src/lib.rs`) — `etdl.performance` is wired in generically:
+`Compiler::new()` seeds `Compiler::extensions` with it, so it runs through
+the same registry-driven `EtdlExtension::validate`/`process` path a
+third-party `Compiler::with_extension` supplement already used, rather than
+adding a third bespoke pipeline call. It is still registered unconditionally
+in `extension::builtin_registry()` alongside the other two, so `etdl
+capabilities`/`etdl supplement list`/the E-108/W-407 "supported supplement"
+check all see it the same way.
+
+### Added — Dynamic supplement plugins (sandboxed `.wasm` hosting)
+
+`etdl-cli`, built with the new opt-in `plugins` Cargo feature (off by
+default — it pulls in `wasmtime`, a full Cranelift JIT), can now load
+third-party supplements as sandboxed WebAssembly modules at runtime, with
+no rebuild of `etdl-cli` itself:
+
+```bash
+etdl supplement install <path-or-https-url>   # checks conformance, then installs
+etdl supplement list                          # built-in extensions + installed plugins
+etdl supplement remove <id>
+```
+
+Installed plugins live in `~/.etdl/plugins/`. A plugin gets no WASI, no
+filesystem/network/clock access, and runs under a `wasmtime` fuel budget
+per call; a plugin that panics, traps, loops, or returns malformed output
+becomes an ordinary `PLUGIN-ERROR` diagnostic, never a host crash. A new
+crate, `etdl-supplement-sdk`, lets a Rust author implement the `Supplement`
+trait and get the wire ABI generated for them via `etdl_supplement!`; the
+raw six-export ABI (`etdl_alloc`/`etdl_dealloc`/`etdl_supplement_id`/
+`etdl_supplement_version`/`etdl_supplement_validate`/
+`etdl_supplement_process`, packed-`u64` return values) is documented for
+non-Rust plugin authors in `docs/reference/supplement-plugins.md`.
+
 ### Fixed — Unbounded hang in `build_span_index` on truncated directives
 
 `etdl_parser::spanned::build_span_index` (used by `etdl-cli` and `etdl-wasm`

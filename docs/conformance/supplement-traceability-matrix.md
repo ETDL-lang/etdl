@@ -34,6 +34,78 @@ legend matches `SPEC_IMPLEMENTATION_MATRIX.md`'s.
 | Zero dependency on Reliability/Probability | IMPLEMENTED + TESTED | `etdl-tree-core/Cargo.toml` | conformance | `ARCH-002` |
 | Compiler integration (`x-tree-event`, supplement gating) | IMPLEMENTED + TESTED | `etdl-compiler::tree_event` | existing | — |
 
+## Performance Supplement 1.0
+
+| Requirement | Implemented? | Where | Test? | Conformance vector |
+|---|---|---|---|---|
+| Only processed when `supplements:` declares `etdl.performance` | IMPLEMENTED + TESTED | `etdl-compiler::performance` | `document_without_x_performance_has_no_diagnostics`, `document_not_declaring_performance_is_unaffected` | — |
+| `budgets` optional at top level; malformed manifest -> E-160 | IMPLEMENTED + TESTED | `etdl-compiler::performance` | `missing_budgets_key_is_not_an_error`, `malformed_budgets_produces_e160` | — |
+| Duplicate budget `id` -> E-160 | IMPLEMENTED + TESTED | `etdl-compiler::performance` | `duplicate_budget_id_produces_e160` | — |
+| `nodeRef` resolves to an Event Tree or Operation node (not Barrier/Consequence) -> else E-160 | IMPLEMENTED + TESTED | `etdl-compiler::performance` | `valid_budget_operation_node_ref_has_no_diagnostics`, `valid_budget_whole_tree_node_ref_has_no_diagnostics`, `unresolvable_node_ref_produces_e160`, `node_ref_at_barrier_is_rejected_produces_e160` | — |
+| Non-positive/non-finite percentile or `maxConcurrency`/`expectedRatePerSecond` -> E-160 | IMPLEMENTED + TESTED | `etdl-compiler::performance` | `non_positive_percentile_produces_e160_without_spurious_e161` | — |
+| Percentile ordering (`p50<=p95<=p99`) -> else E-161 | IMPLEMENTED + TESTED | `etdl-compiler::performance` | `bad_percentile_ordering_produces_e161` | — |
+| Duplicate `nodeRef` across budgets -> W-413 (warning only, both kept) | IMPLEMENTED + TESTED | `etdl-compiler::performance` | `duplicate_node_ref_produces_w413_and_keeps_both_budgets`, `warning_only_diagnostic_is_not_duplicated_by_process` | — |
+| Diagnostics surface through the real `Compiler::validate`/`compile` entry points | IMPLEMENTED + TESTED | `etdl-compiler::performance` (registered generically, not pipeline-special-cased) | `etdl-compiler/tests/performance_wiring_test.rs` | — |
+| No effect on generated code, no fault-tree overrides | IMPLEMENTED + TESTED | `etdl-compiler::performance` (`basic_event_overrides` default, unused) | `process_returns_typed_result_with_correct_extension_id` | — |
+
+No dedicated `PERF-*` conformance vector file exists yet — this supplement
+is a single-file, single-function piece of `etdl-compiler` (no separate
+structural crate, unlike Tree Event) already fully exercised by the unit
+and wiring tests listed above; a `PERF-*` file would substantially duplicate
+that coverage under a different harness. Revisit if an external conformance
+audit specifically requires vector-numbered traceability for these codes.
+
+## Safety Supplement 1.0
+
+| Requirement | Implemented? | Where | Test? | Conformance vector |
+|---|---|---|---|---|
+| Only processed when `supplements:` declares `etdl.safety` | IMPLEMENTED + TESTED | `etdl-compiler::safety` | `document_without_x_safety_has_no_diagnostics`, `document_not_declaring_safety_is_unaffected` | — |
+| `hazards`/`barriers` optional at top level; malformed manifest -> E-130 | IMPLEMENTED + TESTED | `etdl-compiler::safety` | `missing_hazards_and_barriers_keys_are_not_an_error`, `malformed_hazards_produces_e130` | — |
+| Duplicate hazard/barrier `id` -> E-130 | IMPLEMENTED + TESTED | `etdl-compiler::safety` | `duplicate_hazard_id_produces_e130`, `duplicate_barrier_id_produces_e130` | — |
+| Hazard `severity`/`likelihood` enumerated, `riskIndex` in `[1,4]` -> else E-130 | IMPLEMENTED + TESTED | `etdl-compiler::safety` | `invalid_severity_produces_e130`, `invalid_likelihood_produces_e130`, `out_of_range_risk_index_produces_e130` | — |
+| Barrier `sil` in `[1,4]` -> else E-130 | IMPLEMENTED + TESTED | `etdl-compiler::safety` | `out_of_range_sil_produces_e130` | — |
+| `consequenceRef`/`nodeRef` resolve to the required node kind -> else E-131 | IMPLEMENTED + TESTED | `etdl-compiler::safety` | `consequence_ref_at_wrong_node_kind_produces_e131`, `barrier_node_ref_at_wrong_node_kind_produces_e131`, `unresolvable_node_ref_produces_e131` | — |
+| Mutual `independentOf` + shared `commonCauseGroup` (direct or transitive) -> E-132 | IMPLEMENTED + TESTED | `etdl-compiler::safety` | `mutual_independent_of_with_shared_common_cause_group_produces_e132`, `one_sided_independent_of_does_not_produce_e132`, `mutual_independent_of_with_different_common_cause_groups_does_not_produce_e132` | — |
+| `riskIndex` mismatched against the §4.1 risk matrix -> W-410 (warning only, hazard kept) | IMPLEMENTED + TESTED | `etdl-compiler::safety` | `mismatched_risk_index_produces_w410`, `matching_risk_index_has_no_w410` | — |
+| Diagnostics surface through the real `Compiler::validate`/`compile` entry points | IMPLEMENTED + TESTED | `etdl-compiler::safety` (registered generically, not pipeline-special-cased — same shape as Performance) | `etdl-compiler/tests/safety_wiring_test.rs`, including a test proving Performance and Safety run together without interference | — |
+| No effect on generated code, no fault-tree overrides | IMPLEMENTED + TESTED | `etdl-compiler::safety` (`basic_event_overrides` default, unused) | `process_returns_typed_result_with_correct_extension_id` | — |
+
+No dedicated `SAFE-*` conformance vector file exists yet, for the same
+reasoning as Performance's `PERF-*` decision above.
+
+## Diagnostics Supplement 1.0
+
+| Requirement | Implemented? | Where | Test? | Conformance vector |
+|---|---|---|---|---|
+| Only processed when `supplements:` declares `etdl.diagnostics` | IMPLEMENTED + TESTED | `etdl-compiler::diagnostics` | `document_without_x_diagnostics_has_no_diagnostics`, `document_not_declaring_diagnostics_is_unaffected` | — |
+| `correlations`/`anomalyRules` optional at top level; malformed manifest -> E-150 | IMPLEMENTED + TESTED | `etdl-compiler::diagnostics` | `missing_correlations_and_anomaly_rules_keys_are_not_an_error`, `malformed_correlations_produces_e150` | — |
+| `causeRef` resolves to a Gate or Basic Event -> else E-150 | IMPLEMENTED + TESTED | `etdl-compiler::diagnostics` | `unresolvable_cause_ref_produces_e150`, `cause_ref_at_undeclared_gate_produces_e150` | — |
+| `monitors` resolves to any node kind -> else E-150 | IMPLEMENTED + TESTED | `etdl-compiler::diagnostics` | `unresolvable_monitors_produces_e150` | — |
+| Duplicate Correlation/Anomaly Rule `id` (own collection only) -> E-151 | IMPLEMENTED + TESTED | `etdl-compiler::diagnostics` | `duplicate_correlation_id_produces_e151`, `duplicate_anomaly_rule_id_produces_e151`, `correlation_and_anomaly_rule_may_share_an_id` | — |
+| Monitored Operation with no correlated cause -> W-412 (warning only, rule kept) | IMPLEMENTED + TESTED | `etdl-compiler::diagnostics` | `monitored_operation_with_no_probability_source_produces_w412`, `monitored_operation_with_uncorrelated_probability_source_produces_w412`, `monitored_operation_with_correlated_probability_source_has_no_w412` | — |
+| Diagnostics surface through the real `Compiler::validate`/`compile` entry points | IMPLEMENTED + TESTED | `etdl-compiler::diagnostics` (registered generically, not pipeline-special-cased) | `etdl-compiler/tests/diagnostics_wiring_test.rs` | — |
+| No effect on generated code, no fault-tree overrides | IMPLEMENTED + TESTED | `etdl-compiler::diagnostics` (`basic_event_overrides` default, unused) | `process_returns_typed_result_with_correct_extension_id` | — |
+
+No dedicated `DIAG-*` conformance vector file exists yet, for the same
+reasoning as Performance's `PERF-*` decision above.
+
+## Security Supplement 1.0
+
+| Requirement | Implemented? | Where | Test? | Conformance vector |
+|---|---|---|---|---|
+| Only processed when `supplements:` declares `etdl.security` | IMPLEMENTED + TESTED | `etdl-compiler::security` | `document_without_x_security_has_no_diagnostics` | — |
+| `threatModels`/`controls` optional at top level; malformed manifest -> E-140/E-141 | IMPLEMENTED + TESTED | `etdl-compiler::security` | `malformed_threat_models_produces_e140`, `missing_threat_models_and_controls_keys_are_not_an_error` | — |
+| `treeRef` resolves against `etdl.tree-event`'s parsed trees -> else E-140 (natural consequence when `etdl.tree-event` isn't declared) | IMPLEMENTED + TESTED | `etdl-compiler::security` (calls `tree_event::parse_and_validate_trees` directly — the one built-in cross-supplement dependency) | `unresolvable_tree_ref_produces_e140`, `security_without_tree_event_declared_has_unresolvable_tree_refs`, `etdl-compiler/tests/security_wiring_test.rs::tree_event_cross_dependency_resolves_through_the_real_pipeline` | — |
+| `leafCategories` value is a STRIDE category -> else E-140 | IMPLEMENTED + TESTED | `etdl-compiler::security` | `invalid_stride_category_produces_e140` | — |
+| `leafCategories` key / `mitigates` entry is a genuine leaf, Control `nodeRef` resolves to a Barrier, `mitigates` non-empty -> else E-141 | IMPLEMENTED + TESTED | `etdl-compiler::security` | `leaf_categories_key_at_non_leaf_produces_e141`, `control_node_ref_at_wrong_node_kind_produces_e141`, `empty_mitigates_produces_e141`, `mitigates_entry_not_a_leaf_produces_e141` | — |
+| Duplicate Threat Model `id` -> E-140; duplicate Control `id` -> E-141 | IMPLEMENTED + TESTED | `etdl-compiler::security` | `duplicate_threat_model_id_produces_e140`, `duplicate_control_id_produces_e141` | — |
+| Uncategorized leaf is not itself an error; but a Control mitigating one -> W-411 (warning only, control kept) | IMPLEMENTED + TESTED | `etdl-compiler::security` | `uncategorized_leaf_is_not_an_error`, `mitigates_entry_uncategorized_leaf_produces_w411` | — |
+| Diagnostics surface through the real `Compiler::validate`/`compile` entry points | IMPLEMENTED + TESTED | `etdl-compiler::security` (registered generically, not pipeline-special-cased) | `etdl-compiler/tests/security_wiring_test.rs` | — |
+| No effect on generated code, no fault-tree overrides | IMPLEMENTED + TESTED | `etdl-compiler::security` (`basic_event_overrides` default, unused) | `process_returns_typed_result_with_correct_extension_id` | — |
+
+No dedicated `SEC-*` conformance vector file exists yet, for the same
+reasoning as Performance's `PERF-*` decision above.
+
 ## Reliability Supplement 1.0
 
 | Requirement | Implemented? | Where | Test? | Conformance vector |

@@ -1,0 +1,73 @@
+# Performance Supplement demo: one budget on a single Operation node
+# (ProcessPaymentOperation), and one whole-tree, end-to-end budget on
+# OrderFulfillment itself — the two `nodeRef` shapes the spec allows
+# (`ETDL-Performance-Supplement.md` Section 4.1). Purely declarative: no
+# runtime enforcement, no probability math, no effect on generated code
+# (Section 6/7) — comment out the `etdl.performance` line under
+# `supplements:` below and re-validate to see that for yourself.
+
+etdl: "1.0.0"
+info:
+  title: "Order Fulfillment (Performance Demo)"
+  version: "1.0.0"
+  domain: "FulfillmentContext"
+
+supplements:
+  - id: etdl.performance
+    version: "1.0"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent:
+      id: OrderPlacedTrigger
+      message: "api#/components/messages/OrderPlaced"
+      next: InventoryCheckBarrier
+    nodes:
+      InventoryCheckBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.items[*].qty > 0"
+            probability: 0.95
+            next: ProcessPaymentOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.05
+            next: OutOfStockConsequence
+      ProcessPaymentOperation:
+        type: operation
+        action: execute
+        handler: "stripe_charge_handler"
+        next: FulfillmentConsequence
+        onFailure: PaymentFailedConsequence
+      FulfillmentConsequence:
+        type: consequence
+        operation: terminate
+      PaymentFailedConsequence:
+        type: consequence
+        operation: terminate
+      OutOfStockConsequence:
+        type: consequence
+        operation: terminate
+
+x-performance:
+  budgets:
+    # Single-Operation budget: nodeRef shape
+    # "#/eventTrees/<id>/nodes/<operation-id>".
+    - id: process-payment-budget
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      p50Ms: 150
+      p95Ms: 800
+      p99Ms: 2000
+      maxConcurrency: 200
+      expectedRatePerSecond: 50
+
+    # Whole-tree, end-to-end budget: nodeRef shape "#/eventTrees/<id>".
+    - id: order-fulfillment-e2e-budget
+      nodeRef: "#/eventTrees/OrderFulfillment"
+      p50Ms: 400
+      p95Ms: 2500
+      p99Ms: 5000

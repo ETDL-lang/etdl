@@ -1,0 +1,16 @@
+asyncapi: "3.0.0"
+info:
+  title: "Order Fulfillment API (Diagnostics Demo)"
+  version: "1.0.0"
+channels:
+  orders:
+    address: orders
+    messages:
+      OrderPlaced:
+        payload:
+          type: object
+components:
+  messages:
+    OrderPlaced:
+      payload:
+        type: object

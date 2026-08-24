@@ -120,6 +120,17 @@ impl crate::extension::EtdlExtension for TreeEventExtension {
         "1.0"
     }
 
+    fn descriptor(&self) -> crate::extension::SupplementDescriptor {
+        crate::extension::SupplementDescriptor {
+            summary: "Domain-neutral tree-of-events structure — nodes, logical gates \
+                      (AND/OR/NOT/XOR/K_OF_N), validation, traversal — for reliability, safety, \
+                      security, and future domains to each interpret independently.",
+            schema: Some(etdl_tree_core::TREE_SCHEMA),
+            diagnostic_codes: &["E-120", "E-121", "E-122"],
+            requires: &[],
+        }
+    }
+
     fn validate(
         &self,
         doc: &EtlDocument,

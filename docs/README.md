@@ -9,6 +9,7 @@ ETDL is a declarative, design-time domain-specific language (DSL) for **reliabil
 - [Getting Started](getting-started.md) — install, write your first `.etdl` document, compile, run
 - [Quick Start example](examples/order-fulfillment.md) — annotated walkthrough of the spec's worked example
 - [Developer Guide](developer/README.md) — "how do I use ETDL?"
+- [CONTRIBUTING](../CONTRIBUTING.md) — clone and build `etdl-cli` from source, feature flags, running tests
 
 ## Concepts
 
@@ -24,7 +25,12 @@ ETDL is a declarative, design-time domain-specific language (DSL) for **reliabil
 ## Reference
 
 - [CLI](CLI.md) — commands, exit codes, `--json`
-- [Crates](reference/crates.md) — the five crates
+- [Crates](reference/crates.md) — the workspace's crates
+- [Supplement Plugins](reference/supplement-plugins.md) — dynamically loaded, sandboxed third-party `.wasm` supplements
+- [Performance Supplement](reference/performance-supplement.md) — declared latency/throughput budgets on Operations and Event Trees
+- [Safety Supplement](reference/safety-supplement.md) — hazard classification and Safety Integrity Level on core Barrier/Consequence nodes
+- [Diagnostics Supplement](reference/diagnostics-supplement.md) — telemetry-span-to-cause correlation metadata for post-incident triage
+- [Security Supplement](reference/security-supplement.md) — STRIDE-classified attack trees and mitigating controls on core Barrier nodes
 - [API Stability](API_STABILITY.md) — public vs internal API, compatibility
 - [Diagnostics](DIAGNOSTICS.md) — every code, severity, suggestion
 - [Runtime](RUNTIME.md) — guarantees and configuration

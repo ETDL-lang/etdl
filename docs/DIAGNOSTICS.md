@@ -79,6 +79,54 @@ MAJOR version; new codes are added, never reused.
 | W-406 | house event declares a probability/failureRate (boundary condition) |
 | W-001 | duplicate id under `nodes`/`gates`/`basicEvents` (via span detection) |
 
+## Security Supplement (E-14x / W-411)
+
+`etdl.security` (`docs/reference/security-supplement.md`) diagnostics, only
+produced when a document declares `supplements: [{id: etdl.security, ...}]`
+(and depends on `etdl.tree-event` also being declared — see that doc's §5):
+
+| Code | Condition | Suggestion |
+|---|---|---|
+| E-140 | a Threat Model's `leafCategories` value isn't a STRIDE category, `treeRef` doesn't resolve, `threatModels` failed to deserialize, or a duplicate Threat Model id was declared | fix the value / reference / id |
+| E-141 | a `leafCategories` key or `mitigates` entry isn't a leaf of the relevant tree, a Control's `nodeRef` doesn't resolve to a Barrier, `mitigates` is empty, `controls` failed to deserialize, or a duplicate Control id was declared | fix the reference / value / id |
+| W-411 | a `mitigates` entry is a genuine leaf but no declared Threat Model categorizes it | add a `leafCategories` entry, or accept it's uncategorized |
+
+## Diagnostics Supplement (E-15x / W-412)
+
+`etdl.diagnostics` (`docs/reference/diagnostics-supplement.md`) diagnostics,
+only produced when a document declares `supplements: [{id: etdl.diagnostics,
+...}]`:
+
+| Code | Condition | Suggestion |
+|---|---|---|
+| E-150 | a Correlation's `causeRef`, or an Anomaly Rule's `monitors`, doesn't resolve; or `correlations`/`anomalyRules` failed to deserialize | fix the reference |
+| E-151 | two Correlations, or two Anomaly Rules, declare the same id | rename one |
+| W-412 | a monitored Operation has no correlated cause on record | declare a Correlation targeting the Operation's Fault Tree, or accept the gap |
+
+## Safety Supplement (E-13x / W-410)
+
+`etdl.safety` (`docs/reference/safety-supplement.md`) diagnostics, only
+produced when a document declares `supplements: [{id: etdl.safety, ...}]`:
+
+| Code | Condition | Suggestion |
+|---|---|---|
+| E-130 | a Hazard's `severity`/`likelihood`/`riskIndex`, or a Safety Barrier's `sil`, is invalid; `hazards`/`barriers` failed to deserialize; or a duplicate id was declared | fix the value / id |
+| E-131 | a Hazard's `consequenceRef`, or a Safety Barrier's `nodeRef`, doesn't resolve to a node of the required kind | fix the reference |
+| E-132 | two Safety Barriers mutually claim `independentOf` each other while sharing a non-empty `commonCauseGroup` | remove the contradiction (drop the mutual claim, or use distinct groups) |
+| W-410 | a Hazard's declared `riskIndex` doesn't match the Section 4.1 risk matrix for its severity/likelihood | adjust `riskIndex` to match, or document why it's intentionally more conservative |
+
+## Performance Supplement (E-16x / W-41x)
+
+`etdl.performance` (`docs/reference/performance-supplement.md`) diagnostics,
+only produced when a document declares `supplements: [{id: etdl.performance,
+...}]`:
+
+| Code | Condition | Suggestion |
+|---|---|---|
+| E-160 | a Budget's `nodeRef` doesn't resolve to an Event Tree or Operation node; a percentile/`maxConcurrency`/`expectedRatePerSecond` value is non-positive or non-finite; `budgets` failed to deserialize; or a duplicate budget `id` was declared | fix the reference / value / id |
+| E-161 | a Budget's percentile ordering is violated (`p50Ms > p95Ms` or `p95Ms > p99Ms`) | reorder the percentiles |
+| W-413 | two Budgets declare the same `nodeRef` | keep one authoritative Budget per node |
+
 ## Example quality target
 
 ```

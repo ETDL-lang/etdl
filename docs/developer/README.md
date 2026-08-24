@@ -101,5 +101,8 @@ references, hover, outline, completion), and event/fault-tree visualization.
 ## Where to go next
 
 - Concepts: `docs/concepts/event-trees.md`, `docs/concepts/fault-trees.md`
-- Language: `docs/ECEL.md`, `docs/reference/cli.md`
+- Language: `docs/ECEL.md`, `docs/CLI.md`
 - Examples: `docs/examples/`
+- Extending: `docs/reference/supplement-plugins.md` — writing a third-party,
+  dynamically loaded supplement (no rebuild of `etdl-cli`)
+- Building from source: `CONTRIBUTING.md`

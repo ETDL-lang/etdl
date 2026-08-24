@@ -1,0 +1,95 @@
+# Security Supplement demo: one attack tree (declared under x-tree-event —
+# etdl.security has a genuine dependency on etdl.tree-event, both declared
+# below), a Threat Model giving two of its three leaves a STRIDE category
+# (the third, RateLimitBypass, is deliberately left uncategorized — see the
+# W-411 example in README.md), and one Control mapping a core Barrier node
+# to a mitigated threat. Comment out the `etdl.security` line under
+# `supplements:` below (leaving `etdl.tree-event` declared) and re-validate
+# to see x-security become inert, additive metadata.
+
+etdl: "1.0.0"
+info:
+  title: "Order Fulfillment (Security Demo)"
+  version: "1.0.0"
+  domain: "FulfillmentContext"
+
+supplements:
+  - id: etdl.security
+    version: "1.0"
+    metadata:
+      x-requires:
+        - id: etdl.tree-event
+          range: ">=1.0 <2.0"
+  - id: etdl.tree-event
+    version: "1.0"
+
+asyncapi_imports:
+  api: "./api.yaml"
+
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent:
+      id: OrderPlacedTrigger
+      message: "api#/components/messages/OrderPlaced"
+      next: RateLimitBarrier
+    nodes:
+      RateLimitBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.withinRateLimit == true"
+            probability: 0.98
+            next: ProcessPaymentOperation
+          - outcome: FAILURE
+            condition: default
+            probability: 0.02
+            next: RateLimitedConsequence
+      ProcessPaymentOperation:
+        type: operation
+        action: execute
+        handler: "stripe_charge_handler"
+        next: FulfillmentConsequence
+        onFailure: RateLimitedConsequence
+      FulfillmentConsequence:
+        type: consequence
+        operation: terminate
+      RateLimitedConsequence:
+        type: consequence
+        operation: terminate
+
+x-tree-event:
+  trees:
+    - id: "gateway-compromise"
+      version: "1"
+      root: "GatewayCompromised"
+      description: "Ways an attacker could compromise the payment gateway integration."
+      nodes:
+        CredentialStuffing:
+          kind: leaf
+          description: "attacker cycles through leaked credential pairs"
+        ApiKeyLeak:
+          kind: leaf
+          description: "a leaked API key is used directly"
+        RateLimitBypass:
+          kind: leaf
+          description: "attacker evades the rate limiter through distributed requests"
+        GatewayCompromised:
+          kind: gate
+          gate: OR
+          children: ["CredentialStuffing", "ApiKeyLeak", "RateLimitBypass"]
+
+x-security:
+  threatModels:
+    - id: payment-gateway-attack-tree
+      treeRef: "gateway-compromise"
+      leafCategories:
+        CredentialStuffing: spoofing
+        ApiKeyLeak: information-disclosure
+        # RateLimitBypass is deliberately left uncategorized here.
+
+  controls:
+    - id: gateway-rate-limiter
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RateLimitBarrier"
+      framework: "NIST-800-53"
+      controlId: "SC-5"
+      mitigates: ["RateLimitBypass"]
