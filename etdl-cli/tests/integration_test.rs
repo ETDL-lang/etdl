@@ -45,7 +45,7 @@ mod tests {
         assert_eq!(barrier.branches[0].outcome, "SUCCESS");
         assert!(matches!(
             &barrier.branches[0].condition,
-            etdl_parser::ast::Condition::Comparison(_)
+            etdl_parser::ast::Condition::Expr(_)
         ));
         assert!(matches!(
             &barrier.branches[1].condition,
@@ -145,17 +145,21 @@ mod tests {
 
         let cond = parse_condition("message.payload.items[*].qty > 0").unwrap();
         match cond {
-            Condition::Comparison(cmp) => {
+            Condition::Expr(BoolExpr::Comparison(cmp)) => {
                 assert_eq!(cmp.op, Comparator::Gt);
                 match &cmp.left {
-                    Operand::Path(path) => {
+                    Operand::Value(ValueExpr::Path(path)) => {
                         assert_eq!(path.segments.len(), 5);
                     }
                     _ => panic!("expected path"),
                 }
                 match &cmp.right {
-                    Operand::Literal(Literal::Number(n)) => assert_eq!(*n, 0.0),
-                    _ => panic!("expected number literal"),
+                    // A bare number is always `ValueExpr::Number` (spec §6.2's
+                    // `operand = value-expr / literal`: value-expr is tried
+                    // first, so a numeric literal never falls through to
+                    // `Operand::Literal(Literal::Number(_))` in practice).
+                    Operand::Value(ValueExpr::Number(n)) => assert_eq!(*n, 0.0),
+                    _ => panic!("expected number"),
                 }
             }
             _ => panic!("expected comparison"),
@@ -926,5 +930,186 @@ faultTrees:
         assert!(out_dir.join("fulfillmentcontext/workflow.go").exists());
         assert!(out_dir.join("FulfillmentContext/OrderFulfillmentWorkflow.cs").exists());
         let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    // --- Dynamic supplement plugins (`etdl supplement install/list/remove`) ---
+
+    #[cfg(feature = "plugins")]
+    mod supplement_plugins {
+        use super::*;
+        use std::path::Path;
+
+        fn wasm_fixture(name: &str) -> PathBuf {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("etdl-compiler")
+                .join("tests")
+                .join("fixtures")
+                .join("wasm-plugins")
+                .join(name)
+        }
+
+        /// Each test gets its own scratch `$HOME` so `~/.etdl/plugins/`
+        /// never touches the real one, and tests can't interfere with
+        /// each other running in parallel.
+        fn scratch_home() -> PathBuf {
+            let dir = std::env::temp_dir().join(format!(
+                "etdl-supplement-cli-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn run_cli_with_home(home: &Path, args: &[&str]) -> (std::process::Output, String) {
+            let bin = env!("CARGO_BIN_EXE_etdl");
+            let out = std::process::Command::new(bin)
+                .args(args)
+                .env("HOME", home)
+                .output()
+                .expect("cli runs");
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            (out, stdout)
+        }
+
+        #[test]
+        fn install_list_remove_round_trip() {
+            let home = scratch_home();
+
+            let (out, stdout) = run_cli_with_home(&home, &["supplement", "list"]);
+            assert_eq!(out.status.code(), Some(0));
+            assert!(stdout.contains("(none)"), "expected no plugins yet, got: {stdout}");
+
+            let (out, stdout) = run_cli_with_home(
+                &home,
+                &["supplement", "install", wasm_fixture("valid.wasm").to_str().unwrap()],
+            );
+            assert_eq!(out.status.code(), Some(0), "install failed: {stdout}");
+            assert!(stdout.contains("etdl.fixture-valid"));
+
+            let (out, stdout) = run_cli_with_home(&home, &["supplement", "list"]);
+            assert_eq!(out.status.code(), Some(0));
+            assert!(stdout.contains("etdl.fixture-valid"), "got: {stdout}");
+
+            let (out, stdout) =
+                run_cli_with_home(&home, &["supplement", "remove", "etdl.fixture-valid"]);
+            assert_eq!(out.status.code(), Some(0), "remove failed: {stdout}");
+
+            let (out, stdout) = run_cli_with_home(&home, &["supplement", "list"]);
+            assert_eq!(out.status.code(), Some(0));
+            assert!(stdout.contains("(none)"), "expected removed, got: {stdout}");
+
+            let _ = std::fs::remove_dir_all(&home);
+        }
+
+        #[test]
+        fn non_conforming_module_is_rejected_at_install_time() {
+            let home = scratch_home();
+            // "not a wasm module" — see also WasmExtension's own
+            // `not_a_wasm_module_fails_to_load_cleanly` unit test.
+            let bad_file = home.join("not-a-plugin.wasm");
+            std::fs::write(&bad_file, b"this is not a wasm module").unwrap();
+
+            let (out, stdout) = run_cli_with_home(
+                &home,
+                &["supplement", "install", bad_file.to_str().unwrap()],
+            );
+            assert_eq!(out.status.code(), Some(1));
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains("not a conforming supplement plugin"),
+                "got stdout={stdout} stderr={stderr}"
+            );
+
+            let (out, stdout) = run_cli_with_home(&home, &["supplement", "list"]);
+            assert_eq!(out.status.code(), Some(0));
+            assert!(stdout.contains("(none)"), "rejected module must not be installed: {stdout}");
+
+            let _ = std::fs::remove_dir_all(&home);
+        }
+
+        #[test]
+        fn installed_plugin_diagnostic_surfaces_in_validate() {
+            let home = scratch_home();
+            let (out, _) = run_cli_with_home(
+                &home,
+                &["supplement", "install", wasm_fixture("valid.wasm").to_str().unwrap()],
+            );
+            assert_eq!(out.status.code(), Some(0));
+
+            // A minimal document that declares the plugin's supplement id
+            // (the same declare-to-opt-in gate every supplement uses).
+            let doc_dir = home.join("doc");
+            std::fs::create_dir_all(&doc_dir).unwrap();
+            std::fs::write(
+                doc_dir.join("api.yaml"),
+                r#"
+asyncapi: "3.0.0"
+info: { title: "Demo", version: "1.0.0" }
+channels:
+  requests:
+    address: requests
+    messages:
+      Request: { payload: { type: object } }
+components:
+  messages:
+    Request: { payload: { type: object } }
+"#,
+            )
+            .unwrap();
+            std::fs::write(
+                doc_dir.join("doc.etdl"),
+                r#"
+etdl: "1.0.0"
+info: { title: "T", version: "1.0.0", domain: "D" }
+asyncapi_imports:
+  api: "./api.yaml"
+supplements:
+  - id: "etdl.fixture-valid"
+    version: "1.0"
+eventTrees:
+  Flow:
+    initiatingEvent: { id: I, message: "api#/components/messages/Request", next: C }
+    nodes:
+      C: { type: consequence, operation: terminate }
+"#,
+            )
+            .unwrap();
+
+            let (out, stdout) = run_cli_with_home(
+                &home,
+                &["validate", doc_dir.join("doc.etdl").to_str().unwrap()],
+            );
+            assert_eq!(out.status.code(), Some(0), "got: {stdout}");
+            assert!(
+                stdout.contains("FIXTURE-001") && stdout.contains("etdl.fixture-valid"),
+                "expected the plugin's diagnostic to surface, got: {stdout}"
+            );
+
+            let _ = std::fs::remove_dir_all(&home);
+        }
+
+        #[test]
+        fn zero_installed_plugins_is_a_true_no_op() {
+            // The registration point (`compiler_with_plugins`) is additive
+            // by construction, but worth proving directly: an empty
+            // plugins directory must behave identically to the feature
+            // being off entirely.
+            let home = scratch_home();
+            let (out, stdout) = run_cli_with_home(
+                &home,
+                &[
+                    "validate",
+                    fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+                ],
+            );
+            assert_eq!(out.status.code(), Some(0), "got: {stdout}");
+            assert!(stdout.contains("is valid"));
+            let _ = std::fs::remove_dir_all(&home);
+        }
     }
 }

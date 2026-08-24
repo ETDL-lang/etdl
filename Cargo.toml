@@ -11,6 +11,7 @@ members = [
     "etdl-tree-core",
     "etdl-reliability-core",
     "etdl-conformance",
+    "etdl-supplement-sdk",
 ]
 
 # The following crates moved to their own repos as part of the

@@ -40,6 +40,12 @@ target-java = ["dep:etdl-target-java"]
 target-python = ["dep:etdl-target-python"]
 target-go = ["dep:etdl-target-go"]
 target-dotnet = ["dep:etdl-target-dotnet"]
+# Dynamic supplement plugins (`etdl supplement install/list/remove`):
+# sandboxed `wasmtime` hosting of third-party `.wasm` modules. Off by
+# default (not in `default`, unlike the features above) — wasmtime pulls
+# in a full Cranelift JIT, a much heavier dependency than anything else
+# this binary optionally links.
+plugins = ["etdl-compiler/plugins", "dep:ureq"]
 
 [dependencies]
 etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
@@ -55,6 +61,7 @@ etdl-reliability = { git = "https://github.com/ETDL-lang/etdl-reliability", pack
 etdl-reliability-ontology = { git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-reliability-ontology", optional = true }
 etdl-failure-discovery = { git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-failure-discovery", optional = true }
 etdl-conformance = { version = "0.3.1", path = "../etdl-conformance", default-features = false }
+ureq = { version = "2", optional = true }
 clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true

@@ -45,6 +45,8 @@ pub mod stdlib;
 pub mod tree_event;
 mod typeck;
 pub mod validate;
+#[cfg(feature = "plugins")]
+pub mod wasm_extension;
 
 pub use codegen::{CodeGenerator, GeneratedFile, RustCodeGenerator};
 pub use extension::{EtdlExtension, ExtensionContext, ExtensionRegistry};

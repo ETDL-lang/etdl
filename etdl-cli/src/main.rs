@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "plugins")]
+use etdl_compiler::extension::EtdlExtension as _;
 
 mod targets;
 
@@ -198,6 +200,16 @@ enum Command {
         #[command(subcommand)]
         command: TreeCommand,
     },
+    /// Manage dynamically-loaded supplement plugins (sandboxed `.wasm`
+    /// modules run via `wasmtime`; requires this binary built with the
+    /// `plugins` feature). Distinct from `--target java/python/go/dotnet`
+    /// (code-generation bindings) and from the built-in `reliability`/
+    /// `discovery` extensions (compiled into this binary, not dynamically
+    /// loaded).
+    Supplement {
+        #[command(subcommand)]
+        command: SupplementCommand,
+    },
     /// Report the capabilities compiled into this ETDL binary.
     Capabilities,
     /// ETDL Conformance, Verification & Validation: objective per-area
@@ -221,6 +233,28 @@ enum ConformanceCommand {
     /// implementation version, conformance-suite version, supported
     /// supplements/libraries/targets/artifact schemas.
     Manifest,
+}
+
+#[derive(clap::Subcommand)]
+enum SupplementCommand {
+    /// Install a supplement plugin from a local `.wasm` file or an
+    /// `https://` URL. Loads it once to confirm it conforms to the
+    /// expected ABI (exports id/version/validate/process and an
+    /// exported `memory`) before installing — a broken module is
+    /// rejected here, not silently accepted and discovered broken later.
+    Install {
+        #[arg(help = "Path to a .wasm file, or an https:// URL")]
+        source: String,
+    },
+    /// List built-in extensions (reliability, discovery, tree-event) and
+    /// installed dynamic plugins.
+    List,
+    /// Remove an installed plugin by its supplement id (e.g.
+    /// `etdl.mycompany-audit`, as reported by `etdl supplement list`).
+    Remove {
+        #[arg(help = "Supplement id to remove")]
+        id: String,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -601,6 +635,22 @@ fn main() {
             TreeCommand::Validate { file } => cmd_tree_validate(&flags, &file),
             TreeCommand::Inspect { file } => cmd_tree_inspect(&flags, &file),
         },
+        Command::Supplement { command } => {
+            #[cfg(feature = "plugins")]
+            {
+                match command {
+                    SupplementCommand::Install { source } => cmd_supplement_install(&flags, &source),
+                    SupplementCommand::List => cmd_supplement_list(&flags),
+                    SupplementCommand::Remove { id } => cmd_supplement_remove(&flags, &id),
+                }
+            }
+            #[cfg(not(feature = "plugins"))]
+            {
+                let _ = command;
+                capability_unavailable("plugins", "rebuild etdl-cli with the 'plugins' feature");
+                1
+            }
+        }
         Command::Capabilities => cmd_capabilities(&flags),
         Command::Conformance { command } => match command {
             ConformanceCommand::Status => cmd_conformance_status(&flags),
@@ -855,7 +905,7 @@ fn cmd_compile(
 
     let compiler = library_path
         .iter()
-        .fold(etdl_compiler::Compiler::new(), |c, p| {
+        .fold(compiler_with_plugins(etdl_compiler::Compiler::new()), |c, p| {
             c.with_library_search_path(p.clone())
         });
 
@@ -1132,7 +1182,7 @@ fn validate_one(
 
     let compiler = library_path
         .iter()
-        .fold(etdl_compiler::Compiler::new(), |c, p| {
+        .fold(compiler_with_plugins(etdl_compiler::Compiler::new()), |c, p| {
             c.with_library_search_path(p.clone())
         });
     let base_dir = file.parent().unwrap_or(Path::new("."));
@@ -1185,7 +1235,7 @@ fn cmd_analyze(flags: &CliFlags, args: &AnalyzeArgs) -> i32 {
     let compiler = args
         .library_path
         .iter()
-        .fold(etdl_compiler::Compiler::new(), |c, p| {
+        .fold(compiler_with_plugins(etdl_compiler::Compiler::new()), |c, p| {
             c.with_library_search_path(p.clone())
         });
     let (doc, _resolved_libs, _lib_errors) =
@@ -1725,7 +1775,7 @@ fn cmd_reliability_resolve(flags: &CliFlags, file: &Path) -> i32 {
     };
 
     // Validate first; then resolve external sources for the manifest.
-    let compiler = etdl_compiler::Compiler::new();
+    let compiler = compiler_with_plugins(etdl_compiler::Compiler::new());
     let mut diagnostics = compiler.validate_with_base(&doc, &registry, base_dir);
     if diagnostics.iter().any(|d| d.is_error()) {
         print_diagnostics(flags, &diagnostics);
@@ -1797,7 +1847,7 @@ fn cmd_reliability_validate(flags: &CliFlags, file: &Path) -> i32 {
         }
     };
 
-    let compiler = etdl_compiler::Compiler::new();
+    let compiler = compiler_with_plugins(etdl_compiler::Compiler::new());
     let diagnostics = compiler.validate_with_base(&doc, &registry, base_dir);
 
     // Collect every artifact declared in x-reliability.sources and validate it.
@@ -2261,6 +2311,244 @@ fn cmd_library_resolve(flags: &CliFlags, file: &Path, library_path: &[PathBuf]) 
     } else {
         1
     }
+}
+
+// --- Dynamic supplement plugins (`etdl supplement install/list/remove`). ---
+
+/// `~/.etdl/plugins/` — where installed `.wasm` modules and their
+/// manifest live. `$HOME` (or `%USERPROFILE%` on Windows, checked as a
+/// fallback since no cross-platform directories crate is otherwise
+/// pulled into this binary) must be set; there is no other configurable
+/// location in this version.
+#[cfg(feature = "plugins")]
+fn plugins_dir() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "cannot determine home directory (HOME/USERPROFILE not set)".to_string())?;
+    Ok(PathBuf::from(home).join(".etdl").join("plugins"))
+}
+
+#[cfg(feature = "plugins")]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PluginManifestEntry {
+    id: String,
+    version: String,
+    source: String,
+    file: String,
+    installed_at: String,
+}
+
+#[cfg(feature = "plugins")]
+fn manifest_path(dir: &Path) -> PathBuf {
+    dir.join("manifest.json")
+}
+
+#[cfg(feature = "plugins")]
+fn load_manifest(dir: &Path) -> Vec<PluginManifestEntry> {
+    std::fs::read_to_string(manifest_path(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "plugins")]
+fn save_manifest(dir: &Path, entries: &[PluginManifestEntry]) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
+    std::fs::write(manifest_path(dir), json).map_err(|e| e.to_string())
+}
+
+/// Registers every installed plugin (`~/.etdl/plugins/*.wasm`, per the
+/// manifest) onto `compiler` via the pre-existing, previously-unused
+/// `Compiler::with_extension` — additive: a document behaves identically
+/// whether or not any plugins are installed, and installing zero plugins
+/// (or building without the `plugins` feature) leaves this a no-op.
+/// Load failures are logged to stderr and skipped rather than aborting
+/// the whole command — one broken plugin should not block ordinary
+/// `etdl validate`/`compile`/`analyze` use.
+fn compiler_with_plugins(compiler: etdl_compiler::Compiler) -> etdl_compiler::Compiler {
+    #[cfg(feature = "plugins")]
+    {
+        let Ok(dir) = plugins_dir() else {
+            return compiler;
+        };
+        let entries = load_manifest(&dir);
+        entries.into_iter().fold(compiler, |c, entry| {
+            let path = dir.join(&entry.file);
+            match std::fs::read(&path) {
+                Ok(bytes) => match etdl_compiler::wasm_extension::WasmExtension::load(&bytes) {
+                    Ok(ext) => c.with_extension(Box::new(ext)),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: installed plugin '{}' failed to load, skipping: {}",
+                            entry.id, e
+                        );
+                        c
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "warning: installed plugin '{}' file missing ({}), skipping: {}",
+                        entry.id,
+                        path.display(),
+                        e
+                    );
+                    c
+                }
+            }
+        })
+    }
+    #[cfg(not(feature = "plugins"))]
+    {
+        compiler
+    }
+}
+
+#[cfg(feature = "plugins")]
+fn fetch_plugin_bytes(source: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    if source.starts_with("https://") {
+        let response = ureq::get(source)
+            .call()
+            .map_err(|e| format!("download failed: {e}"))?;
+        let mut bytes = Vec::new();
+        response
+            .into_reader()
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("failed to read response body: {e}"))?;
+        Ok(bytes)
+    } else if source.starts_with("http://") {
+        Err("only https:// URLs are accepted (a supplement plugin is executable code; \
+             fetching it over plain http is not supported)"
+            .to_string())
+    } else {
+        std::fs::read(source).map_err(|e| format!("cannot read '{}': {}", source, e))
+    }
+}
+
+#[cfg(feature = "plugins")]
+fn cmd_supplement_install(flags: &CliFlags, source: &str) -> i32 {
+    let _ = flags;
+
+    let bytes = match fetch_plugin_bytes(source) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
+
+    // Load once now, before installing anything, so a broken/non-conforming
+    // module is rejected here rather than silently accepted and only
+    // discovered broken on first real use.
+    let ext = match etdl_compiler::wasm_extension::WasmExtension::load(&bytes) {
+        Ok(ext) => ext,
+        Err(e) => {
+            eprintln!("error: not a conforming supplement plugin: {}", e);
+            return 1;
+        }
+    };
+
+    let dir = match plugins_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("error: cannot create '{}': {}", dir.display(), e);
+        return 1;
+    }
+
+    let file_name = format!("{}.wasm", ext.id().replace(['/', '\\', ':'], "_"));
+    let dest = dir.join(&file_name);
+    if let Err(e) = std::fs::write(&dest, &bytes) {
+        eprintln!("error: cannot write '{}': {}", dest.display(), e);
+        return 1;
+    }
+
+    let mut entries = load_manifest(&dir);
+    entries.retain(|e| e.id != ext.id());
+    entries.push(PluginManifestEntry {
+        id: ext.id().to_string(),
+        version: ext.version().to_string(),
+        source: source.to_string(),
+        file: file_name,
+        installed_at: format!("{:?}", std::time::SystemTime::now()),
+    });
+    if let Err(e) = save_manifest(&dir, &entries) {
+        eprintln!("error: cannot update manifest: {}", e);
+        return 1;
+    }
+
+    println!("installed {} v{} (from {})", ext.id(), ext.version(), source);
+    0
+}
+
+#[cfg(feature = "plugins")]
+fn cmd_supplement_list(flags: &CliFlags) -> i32 {
+    let registry = etdl_compiler::extension::builtin_registry();
+    let dir = plugins_dir().ok();
+    let installed = dir.as_deref().map(load_manifest).unwrap_or_default();
+
+    if flags.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "builtin": registry.list(),
+                "installed": installed,
+            })
+        );
+        return 0;
+    }
+
+    println!("Built-in extensions:");
+    for id in registry.list() {
+        println!("  {}", id);
+    }
+    println!("Installed plugins:");
+    if installed.is_empty() {
+        println!("  (none)");
+    } else {
+        for entry in &installed {
+            println!(
+                "  {} v{} (from {}, installed {})",
+                entry.id, entry.version, entry.source, entry.installed_at
+            );
+        }
+    }
+    0
+}
+
+#[cfg(feature = "plugins")]
+fn cmd_supplement_remove(flags: &CliFlags, id: &str) -> i32 {
+    let _ = flags;
+    let dir = match plugins_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
+    let mut entries = load_manifest(&dir);
+    let Some(pos) = entries.iter().position(|e| e.id == id) else {
+        eprintln!("error: no installed plugin with id '{}'", id);
+        return 1;
+    };
+    let entry = entries.remove(pos);
+    let path = dir.join(&entry.file);
+    if path.exists() {
+        if let Err(e) = std::fs::remove_file(&path) {
+            eprintln!("error: cannot remove '{}': {}", path.display(), e);
+            return 1;
+        }
+    }
+    if let Err(e) = save_manifest(&dir, &entries) {
+        eprintln!("error: cannot update manifest: {}", e);
+        return 1;
+    }
+    println!("removed {}", id);
+    0
 }
 
 fn parse_document_or_exit(file: &Path) -> Result<etdl_parser::ast::EtlDocument, i32> {

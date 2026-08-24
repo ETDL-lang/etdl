@@ -13,6 +13,11 @@ homepage = "https://github.com/ETDL-lang/etdl"
 [features]
 default = ["reliability"]
 reliability = ["dep:etdl-reliability-core"]
+# Dynamic supplement plugins (`etdl supplement install`): sandboxed,
+# fuel-limited wasmtime hosting, no WASI linked. Optional because
+# wasmtime is a substantial dependency (a Cranelift JIT) that a build not
+# using dynamic plugins shouldn't have to pull in.
+plugins = ["dep:wasmtime", "dep:etdl-supplement-sdk"]
 
 [dependencies]
 etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
@@ -22,6 +27,8 @@ serde.workspace = true
 serde_yaml.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+wasmtime = { version = "48", optional = true, default-features = false, features = ["cranelift", "runtime"] }
+etdl-supplement-sdk = { version = "0.1.0", path = "../etdl-supplement-sdk", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
