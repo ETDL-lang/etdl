@@ -36,7 +36,7 @@ etdl-core = { version = "0.3.1", path = "../etdl-core" }
 etdl-probability-core = { version = "0.3.1", path = "../etdl-probability-core" }
 etdl-tree-core = { version = "0.3.1", path = "../etdl-tree-core" }
 etdl-reliability-core = { version = "0.3.1", path = "../etdl-reliability-core", optional = true }
-etdl-reliability = { git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-reliability", optional = true }
+etdl-reliability = { version = "0.3.1", git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-reliability", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

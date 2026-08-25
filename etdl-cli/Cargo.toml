@@ -50,16 +50,16 @@ plugins = ["etdl-compiler/plugins", "dep:ureq"]
 [dependencies]
 etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
 etdl-compiler = { version = "0.3.1", path = "../etdl-compiler", default-features = false }
-etdl-target-java = { git = "https://github.com/ETDL-lang/etdl-target-java", package = "etdl-target-java", optional = true }
-etdl-target-python = { git = "https://github.com/ETDL-lang/etdl-target-python", package = "etdl-target-python", optional = true }
-etdl-target-go = { git = "https://github.com/ETDL-lang/etdl-target-go", package = "etdl-target-go", optional = true }
-etdl-target-dotnet = { git = "https://github.com/ETDL-lang/etdl-target-dotnet", package = "etdl-target-dotnet", optional = true }
+etdl-target-java = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-java", package = "etdl-target-java", optional = true }
+etdl-target-python = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-python", package = "etdl-target-python", optional = true }
+etdl-target-go = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-go", package = "etdl-target-go", optional = true }
+etdl-target-dotnet = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-dotnet", package = "etdl-target-dotnet", optional = true }
 etdl-probability-core = { version = "0.3.1", path = "../etdl-probability-core" }
 etdl-tree-core = { version = "0.3.1", path = "../etdl-tree-core" }
 etdl-reliability-core = { version = "0.3.1", path = "../etdl-reliability-core", optional = true }
-etdl-reliability = { git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-reliability", optional = true }
-etdl-reliability-ontology = { git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-reliability-ontology", optional = true }
-etdl-failure-discovery = { git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-failure-discovery", optional = true }
+etdl-reliability = { version = "0.3.1", git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-reliability", optional = true }
+etdl-reliability-ontology = { version = "0.3.1", git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-reliability-ontology", optional = true }
+etdl-failure-discovery = { version = "0.3.1", git = "https://github.com/ETDL-lang/etdl-reliability", package = "etdl-failure-discovery", optional = true }
 etdl-conformance = { version = "0.3.1", path = "../etdl-conformance", default-features = false }
 ureq = { version = "2", optional = true }
 clap = { version = "4", features = ["derive"] }
