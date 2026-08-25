@@ -50,10 +50,10 @@ plugins = ["etdl-compiler/plugins", "dep:ureq"]
 [dependencies]
 etdl-parser = { version = "0.4.0", path = "../etdl-parser" }
 etdl-compiler = { version = "0.4.0", path = "../etdl-compiler", default-features = false }
-etdl-target-java = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-java", package = "etdl-target-java", optional = true }
-etdl-target-python = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-python", package = "etdl-target-python", optional = true }
-etdl-target-go = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-go", package = "etdl-target-go", optional = true }
-etdl-target-dotnet = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-dotnet", package = "etdl-target-dotnet", optional = true }
+etdl-target-java = { version = "0.0.2", git = "https://github.com/ETDL-lang/etdl-target-java", package = "etdl-target-java", optional = true }
+etdl-target-python = { version = "0.0.2", git = "https://github.com/ETDL-lang/etdl-target-python", package = "etdl-target-python", optional = true }
+etdl-target-go = { version = "0.0.2", git = "https://github.com/ETDL-lang/etdl-target-go", package = "etdl-target-go", optional = true }
+etdl-target-dotnet = { version = "0.0.2", git = "https://github.com/ETDL-lang/etdl-target-dotnet", package = "etdl-target-dotnet", optional = true }
 etdl-probability-core = { version = "0.3.1", path = "../etdl-probability-core" }
 etdl-tree-core = { version = "0.3.1", path = "../etdl-tree-core" }
 etdl-reliability-core = { version = "0.3.1", path = "../etdl-reliability-core", optional = true }
