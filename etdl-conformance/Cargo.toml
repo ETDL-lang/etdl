@@ -25,13 +25,13 @@ reliability = [
 ]
 
 [dependencies]
-etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
+etdl-parser = { version = "0.4.0", path = "../etdl-parser" }
 # `default-features = false` + the `reliability` feature unifying
 # `etdl-compiler/reliability` below: without this, etdl-compiler's own
 # `default = ["reliability"]` would leak the reliability engine into a
 # lean build depending on this crate, exactly the accidental-dependency
 # category ARCH-004/ARCH-007 (tests/architecture.rs) exist to catch.
-etdl-compiler = { version = "0.3.1", path = "../etdl-compiler", default-features = false }
+etdl-compiler = { version = "0.4.0", path = "../etdl-compiler", default-features = false }
 etdl-core = { version = "0.3.1", path = "../etdl-core" }
 etdl-probability-core = { version = "0.3.1", path = "../etdl-probability-core" }
 etdl-tree-core = { version = "0.3.1", path = "../etdl-tree-core" }

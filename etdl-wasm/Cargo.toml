@@ -14,8 +14,8 @@ homepage = "https://github.com/ETDL-lang/etdl"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
-etdl-compiler = { version = "0.3.1", path = "../etdl-compiler" }
+etdl-parser = { version = "0.4.0", path = "../etdl-parser" }
+etdl-compiler = { version = "0.4.0", path = "../etdl-compiler" }
 wasm-bindgen = "=0.2.100"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

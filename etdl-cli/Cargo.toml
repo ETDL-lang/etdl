@@ -48,8 +48,8 @@ target-dotnet = ["dep:etdl-target-dotnet"]
 plugins = ["etdl-compiler/plugins", "dep:ureq"]
 
 [dependencies]
-etdl-parser = { version = "0.3.1", path = "../etdl-parser" }
-etdl-compiler = { version = "0.3.1", path = "../etdl-compiler", default-features = false }
+etdl-parser = { version = "0.4.0", path = "../etdl-parser" }
+etdl-compiler = { version = "0.4.0", path = "../etdl-compiler", default-features = false }
 etdl-target-java = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-java", package = "etdl-target-java", optional = true }
 etdl-target-python = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-python", package = "etdl-target-python", optional = true }
 etdl-target-go = { version = "0.0.1", git = "https://github.com/ETDL-lang/etdl-target-go", package = "etdl-target-go", optional = true }
