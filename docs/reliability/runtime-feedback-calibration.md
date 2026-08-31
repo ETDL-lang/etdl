@@ -38,6 +38,16 @@ function anywhere in `etdl-reliability::calibration` or `etdl-reliability::datas
 that could feed a calibration result back into an artifact, a fault tree, or
 generated code.
 
+**One explicit, opt-in exception**: the
+[Live Reliability Supplement](../reference/live-reliability.md)
+(`etdl.live-reliability`) *is* a runtime layer that changes a fault tree's
+effective probability without recompiling — deliberately, and only for a
+fault tree that declares it. It does not touch this artifact/`calibrate`
+workflow at all (no `.rprob` file, no `etdl-reliability` crate involved);
+it's a separate, bounded, per-process mechanism documented on its own page.
+Every fault tree that doesn't declare that supplement is fully governed by
+the invariant above, without exception.
+
 ## Runtime observations (`etdl-core::observation`)
 
 `BranchMonitor::record_branch` and `record_failure` — already called by

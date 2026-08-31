@@ -1,8 +1,8 @@
 //! Dynamic supplement plugins: a sandboxed `wasmtime` host adapter
 //! implementing [`EtdlExtension`] over a loaded `.wasm` module.
 //!
-//! A plugin is untrusted third-party code (`etdl supplement install
-//! <path-or-url>`), so every call into it is bounded: no WASI is linked
+//! A plugin is untrusted third-party code (`etdl install <path-or-url>`),
+//! so every call into it is bounded: no WASI is linked
 //! (no ambient filesystem, network, clock, or environment access — the
 //! module's only capability is the JSON-in/JSON-out ABI below), and every
 //! call runs under a fuel limit so a plugin that loops forever gets
@@ -63,8 +63,8 @@ impl WasmExtension {
     /// none) and export the id/version functions we call once here to
     /// populate this adapter's cached identity. Returns an error rather
     /// than panicking on anything malformed — this is the same function
-    /// `etdl supplement install` calls to reject a broken module before
-    /// ever installing it.
+    /// `etdl install` calls to reject a broken module before ever
+    /// installing it.
     pub fn load(bytes: &[u8]) -> Result<Self, String> {
         let mut config = Config::new();
         config.consume_fuel(true);

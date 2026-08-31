@@ -3,7 +3,10 @@
 `budget-demo.etdl` declares two Budget Objects (`ETDL-Performance-Supplement.md`
 Section 4.1) against one Event Tree: a single-Operation budget on
 `ProcessPaymentOperation`, and a whole-tree, end-to-end budget on
-`OrderFulfillment` itself — the two `nodeRef` shapes the spec allows.
+`OrderFulfillment` itself — the two `nodeRef` shapes the spec allows — plus
+one Barrier Check Object (Section 4.2) linking a new `PaymentPerfBarrier`
+node to the Operation-level budget, so it can branch on
+`performance.in_budget` (Section 6.3).
 
 ```bash
 etdl validate budget-demo.etdl
@@ -16,31 +19,54 @@ $ etdl validate budget-demo.etdl
 document 'budget-demo.etdl' is valid (0 errors, 0 warnings)
 ```
 
-## What's declared, and why no probability/enforcement language appears
+## What's declared, and what it actually does now
 
 `x-performance` (the same generic `x-*` extension mechanism `x-reliability`
 and `x-tree-event` already use — **zero parser or AST changes** were needed
-for this supplement either), gated by `supplements: [{id: etdl.performance,
-...}]` exactly like the other two. `p50Ms`/`p95Ms`/`p99Ms`/`maxConcurrency`/
-`expectedRatePerSecond` are the only vocabulary here — no retry policy, no
-probability, no SLA threshold configuration. Per spec Section 6, a Budget's
-percentile targets are a declared expectation for downstream tooling and
-deployment configuration to consult; the compiler validates their shape and
-does not enforce them against measured runtime latency.
+for this supplement, including for `performance.in_budget`), gated by
+`supplements: [{id: etdl.performance, ...}]` exactly like the other core
+supplements.
 
-## Proving it's purely declarative
+Unlike earlier revisions of this supplement, none of this is purely
+declarative anymore (`ETDL-Performance-Supplement.md` Section 6):
 
-Compile the document, then compile a version of it with the `supplements:`
-declaration and `x-performance` block removed entirely — the generated Rust
-is byte-for-byte identical:
+- **`maxConcurrency: 200`/`expectedRatePerSecond: 50`** on
+  `process-payment-budget` are structurally enforced — generated code
+  acquires a concurrency permit and a rate token
+  (`etdl_core::perf::enter`) before every call to
+  `stripe_charge_handler`, a real block, not advisory.
+- **`p99Ms: 2000`** becomes the effective timeout for that same call,
+  since `ProcessPaymentOperation` declares no explicit `timeoutMs`/
+  `retryPolicy` of its own — codegen synthesizes a single-attempt retry
+  policy purely to gain the timeout wrapper.
+- **`PaymentPerfBarrier`'s `OK`/`DEGRADED` branch selection** is driven
+  live by `process-payment-budget`'s current status
+  (`performance.in_budget`) — resolved via the `barrierChecks` entry
+  linking that barrier to that budget, not by any field on the branch
+  itself.
+- **`order-fulfillment-e2e-budget`** (the whole-tree budget, no
+  `maxConcurrency`/`expectedRatePerSecond` declared) contributes only
+  latency observation for now — no Barrier links to it in this example,
+  so nothing branches on it, but its percentiles are still tracked.
+
+Inspect the generated code to see all of this directly:
 
 ```bash
-etdl compile budget-demo.etdl --out-dir /tmp/with-perf
-# ...remove supplements:/x-performance from a copy...
-etdl compile budget-demo-stripped.etdl --out-dir /tmp/without-perf
-diff /tmp/with-perf/budget-demo.rs /tmp/without-perf/budget-demo-stripped.rs
-# (identical apart from the filename)
+etdl compile budget-demo.etdl --out-dir ./generated
+cat generated/budget-demo.rs
 ```
+
+## Compatibility
+
+Comment out the `supplements: [{id: etdl.performance, ...}]` block (leaving
+`x-performance` in place) and re-run `etdl validate` — it stays valid with
+zero performance-related diagnostics. Then `etdl compile` the stripped
+document: the generated code has none of `etdl_core::perf`'s registration/
+enforcement/`in_budget` calls, and `PaymentPerfBarrier`'s condition can no
+longer even parse as `performance.in_budget` without the supplement
+declared (that would be `E-163`) — proving `x-performance` is fully
+additive, never a precondition for parsing, validation, or a plain
+build's generated code.
 
 ## Triggering each diagnostic
 
@@ -66,12 +92,38 @@ nodeRef: "#/eventTrees/DoesNotExist"
   ...
 ```
 
+```yaml
+# E-162: barrierChecks nodeRef doesn't resolve to a Barrier node
+barrierChecks:
+  - id: bad-guard
+    nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+    budgetRef: process-payment-budget
+```
+
+```yaml
+# E-162: barrierChecks budgetRef doesn't resolve to a declared budget
+barrierChecks:
+  - id: bad-guard
+    nodeRef: "#/eventTrees/OrderFulfillment/nodes/PaymentPerfBarrier"
+    budgetRef: no-such-budget
+```
+
+```yaml
+# W-415: two barrierChecks entries declare the same nodeRef (still valid — warning only)
+barrierChecks:
+  - id: first
+    nodeRef: "#/eventTrees/OrderFulfillment/nodes/PaymentPerfBarrier"
+    budgetRef: process-payment-budget
+  - id: second
+    nodeRef: "#/eventTrees/OrderFulfillment/nodes/PaymentPerfBarrier"
+    budgetRef: process-payment-budget
+```
+
+```yaml
+# E-163: performance.in_budget used without the supplement declared, or
+# combined with && instead of being the entire branch condition
+condition: "performance.in_budget == true && message.payload.items[*].qty > 0"
+```
+
 `etdl validate --json budget-demo.etdl` reports the same diagnostics as the
 plain-text form, machine-readably.
-
-## Compatibility
-
-Comment out the `supplements: [{id: etdl.performance, ...}]` block (leaving
-`x-performance` in place) and re-run `etdl validate` — it stays valid with
-zero performance-related diagnostics, proving `x-performance` is additive
-metadata, never a precondition for parsing or validation (spec Section 7).

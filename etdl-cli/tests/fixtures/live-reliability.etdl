@@ -1,0 +1,70 @@
+etdl: "1.0.0"
+info:
+  title: "Live Reliability Supplement end-to-end check"
+  version: "1.0.0"
+  domain: "Test"
+  description: "Exercises etdl.live-reliability: a Barrier whose branch selection is driven by reliability.in_range against a fault tree's live-tracked top event, plus the read-side (record_branch's recorded probability) and the registration codegen (LiveFaultTreeBuilder chain). No asyncapi_imports — inline components.messages, matching inline-messages.etdl's pattern."
+
+components:
+  messages:
+    Trigger:
+      name: Trigger
+      payload:
+        type: object
+
+faultTrees:
+  GatewayFailure:
+    description: "A single basic event, live-tracked."
+    topEvent:
+      id: GatewayFailureTop
+      description: "The gateway is unreachable."
+      rootCause: GatewayUnreachable
+    basicEvents:
+      GatewayUnreachable:
+        description: "The payment gateway cannot be reached."
+        probability: 0.1
+
+x-live-reliability:
+  faultTrees:
+    - id: GatewayFailure
+      threshold: 0.3
+      basicEvents:
+        - id: GatewayUnreachable
+          source: local
+          priorStrength: 10
+
+supplements:
+  - id: etdl.live-reliability
+    version: "1.0"
+
+eventTrees:
+  LiveReliabilityCheck:
+    initiatingEvent:
+      id: LiveTrigger
+      message: "#/components/messages/Trigger"
+      next: RiskBarrier
+
+    nodes:
+      RiskBarrier:
+        type: barrier
+        description: "Branch selection is driven by the live probability-normalcy check, not an ordinary payload comparison."
+        branches:
+          - outcome: NORMAL
+            condition: "reliability.in_range == true"
+            probabilitySource: "#/faultTrees/GatewayFailure/topEvent"
+            next: NormalConsequence
+          - outcome: ABNORMAL
+            condition: "default"
+            next: AbnormalConsequence
+
+      NormalConsequence:
+        type: consequence
+        operation: send
+        channel: "normal-channel"
+        message: "#/components/messages/Trigger"
+
+      AbnormalConsequence:
+        type: consequence
+        operation: send
+        channel: "abnormal-channel"
+        message: "#/components/messages/Trigger"

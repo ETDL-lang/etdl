@@ -17,6 +17,7 @@
 | `Publisher` | The `consequence: send` boundary generated code calls into — implement it against your real broker/client |
 | `telemetry::inject_traceparent` | W3C trace context propagation |
 | `observation` | Reliability observation types + sinks (JSON Lines, OTel-shaped, in-memory capturing) |
+| `exporters` | Optional, off-by-default Prometheus/Loki/OTLP exporters for `BranchMonitor`'s runtime observations (`exporter-prometheus`/`-loki`/`-otlp` features) — see [Observability Exporters](https://github.com/ETDL-lang/etdl/blob/main/docs/reference/observability-exporters.md) |
 
 ## Why this crate, specifically, is the one every target binds to
 
@@ -28,7 +29,7 @@ ETDL compiles event trees (IEC 62502) and fault trees (IEC 61025) into code with
 use etdl_core::{BranchMonitor, BackoffStrategy, RetryPolicy};
 
 let mut monitor = BranchMonitor::new("InventoryCheckBarrier");
-monitor.record_branch("SUCCESS", 0.95);
+monitor.record_branch("InventoryCheckBarrier", "SUCCESS", 0.95);
 
 let retry = RetryPolicy {
     max_attempts: 3,

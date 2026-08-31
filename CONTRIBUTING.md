@@ -22,15 +22,13 @@ The `etdl` binary lands at `target/release/etdl`.
 ### Feature flags
 
 `etdl-cli`'s default features are `reliability`, `discovery`,
-`target-java`, `target-python`, `target-go`, `target-dotnet` — everything
-except `plugins`, which is off by default because it pulls in `wasmtime`
-(a full Cranelift JIT), a much heavier dependency than anything else the
-binary optionally links:
+`target-java`, `target-python`, `target-go`, `target-dotnet`. Dynamic,
+sandboxed `.wasm` supplement plugins (`etdl install`, `etdl supplement
+list/remove`) are always compiled in — not feature-gated, so no flag is
+needed for them, and they pull in `wasmtime` (a full Cranelift JIT) on
+every build:
 
 ```bash
-# Add dynamic, sandboxed .wasm supplement plugins (etdl supplement install/list/remove):
-cargo build --release -p etdl-cli --features plugins
-
 # A minimal build advertising only the always-available `rust` target:
 cargo build --release -p etdl-cli --no-default-features --features reliability,discovery
 ```

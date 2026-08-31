@@ -40,6 +40,7 @@ pub mod codegen;
 pub mod diagnostics;
 pub mod extension;
 pub mod fault_tree;
+pub mod live_reliability;
 pub mod performance;
 #[cfg(feature = "reliability")]
 pub mod reliability;
@@ -49,7 +50,6 @@ pub mod stdlib;
 pub mod tree_event;
 mod typeck;
 pub mod validate;
-#[cfg(feature = "plugins")]
 pub mod wasm_extension;
 
 pub use codegen::{CodeGenerator, GeneratedFile, RustCodeGenerator};
@@ -141,6 +141,7 @@ impl Compiler {
                 Box::new(safety::SafetyExtension::new()),
                 Box::new(diagnostics::DiagnosticsExtension::new()),
                 Box::new(security::SecurityExtension::new()),
+                Box::new(live_reliability::LiveReliabilityExtension::new()),
             ],
         }
     }
@@ -278,11 +279,26 @@ impl Compiler {
             "generated",
             &mut diagnostics,
         );
-        let rust_output = gen_result
-            .ok()
-            .and_then(|files| files.into_iter().next())
-            .map(|f| f.contents)
-            .filter(|s| !s.is_empty());
+        let rust_output = match gen_result {
+            Ok(files) => files.into_iter().next().map(|f| f.contents).filter(|s| !s.is_empty()),
+            Err(msg) => {
+                // Without this, a codegen-level `Result::Err` (e.g. a
+                // Barrier referencing `reliability.in_range`/
+                // `performance.in_budget` with no matching link — see
+                // `codegen/rust.rs`'s `try_render_reliability_condition`/
+                // `try_render_performance_condition`) failed safely
+                // (`files: None`, no broken code emitted) but silently: the
+                // CLI printed "compilation failed... 0 errors" with no
+                // indication why. Reusing the same `diagnostics` channel
+                // every other failure already reports through means no
+                // caller needs a new field to see it.
+                diagnostics.push(Diagnostic::error(
+                    "E-109",
+                    format!("code generation failed: {msg}"),
+                ));
+                None
+            }
+        };
 
         CompilationResult {
             diagnostics,
@@ -334,7 +350,19 @@ impl Compiler {
             stem,
             &mut diagnostics,
         );
-        let files = gen_result.ok().filter(|files| !files.is_empty());
+        let files = match gen_result {
+            Ok(files) => Some(files).filter(|files| !files.is_empty()),
+            Err(msg) => {
+                // See the matching comment in `compile_with_base` — the
+                // same "codegen failed silently" gap, for every non-Rust
+                // target too.
+                diagnostics.push(Diagnostic::error(
+                    "E-109",
+                    format!("code generation failed: {msg}"),
+                ));
+                None
+            }
+        };
 
         TargetCompilationResult {
             diagnostics,

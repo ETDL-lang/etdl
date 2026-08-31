@@ -20,14 +20,27 @@
  * bump. A language binding should call [`etdl_runtime_abi_version`] at
  * startup and refuse to run (or warn loudly) against an unexpected major
  * version, rather than silently misinterpreting the ABI.
+ *
+ * `2`: [`etdl_branch_monitor_record_branch`] gained a `node_id` parameter
+ * (fixes multiple barriers sharing one handle being mis-attributed to
+ * whichever id the handle was created with — see its doc comment).
  */
-#define ETDL_RUNTIME_ABI_VERSION 1
+#define ETDL_RUNTIME_ABI_VERSION 2
 
 #define ETDL_OK 0
 
 #define ETDL_ERR_NULL_HANDLE -1
 
 #define ETDL_ERR_INVALID_ARG -2
+
+/**
+ * Returned by an `etdl_exporter_*_install` function when this library was
+ * built without the matching `exporter-*` Cargo feature. The function
+ * still exists (a stable, unconditional symbol set — no
+ * `dlsym`/`GetProcAddress` probing required by callers); it just reports
+ * that clearly instead of doing anything.
+ */
+#define ETDL_ERR_NOT_COMPILED_IN -3
 
 #define ETDL_ERR_PANIC -99
 
@@ -99,10 +112,14 @@ struct EtdlBranchMonitor *etdl_branch_monitor_new(const char *node_id);
 void etdl_branch_monitor_free(struct EtdlBranchMonitor *handle);
 
 /**
- * Records that `outcome` was taken with `probability`. Returns
- * [`ETDL_OK`] or a negative error code.
+ * Records that `outcome` was taken at `node_id`, with `probability`.
+ * `node_id` lets one handle be reused across several barriers in the same
+ * call and still attribute each one's SLA window independently — pass the
+ * specific barrier's own id, not necessarily the id `handle` was created
+ * with. Returns [`ETDL_OK`] or a negative error code.
  */
 int32_t etdl_branch_monitor_record_branch(struct EtdlBranchMonitor *handle,
+                                          const char *node_id,
                                           const char *outcome,
                                           double probability);
 
@@ -188,5 +205,39 @@ int32_t etdl_condition_matches(const char *value, const char *pattern);
  * [`etdl_last_error_message`]).
  */
 int32_t etdl_condition_contains(const char *needle_json, const char *haystack_json_array);
+
+/**
+ * Starts the compiled-in Prometheus scrape endpoint at `bind_addr` (e.g.
+ * `"127.0.0.1:9464"`, serving `/metrics`). Call once at startup, before
+ * handling any messages. Returns [`ETDL_OK`], [`ETDL_ERR_INVALID_ARG`]
+ * (null/invalid-UTF-8/unparseable address, or the exporter failed to
+ * start), or [`ETDL_ERR_NOT_COMPILED_IN`] if this library was built
+ * without the `exporter-prometheus` feature.
+ */
+int32_t etdl_exporter_prometheus_install(const char *bind_addr);
+
+/**
+ * Pushes observations to a Loki-compatible push API at `loki_url` (e.g.
+ * `"http://localhost:3100"`). `labels_json` is a JSON object of string
+ * labels attached to every pushed stream (e.g. `{"service":"payments"}`);
+ * `NULL` or `"{}"` means no extra labels. Call once at startup, before
+ * handling any messages — installs a fresh global `tracing` subscriber,
+ * so do not call this if the host process already has its own. Returns
+ * [`ETDL_OK`], [`ETDL_ERR_INVALID_ARG`] (null/invalid UTF-8/unparseable
+ * URL or labels, or setup failed), or [`ETDL_ERR_NOT_COMPILED_IN`] if
+ * this library was built without the `exporter-loki` feature.
+ */
+int32_t etdl_exporter_loki_install(const char *loki_url, const char *labels_json);
+
+/**
+ * Pushes metrics to an OTel Collector (or any OTLP/HTTP receiver) at
+ * `endpoint` (e.g. `"http://localhost:4318"`) via the official
+ * OpenTelemetry Rust SDK, over HTTP+protobuf. Call once at startup,
+ * before handling any messages. Returns [`ETDL_OK`],
+ * [`ETDL_ERR_INVALID_ARG`] (null/invalid UTF-8, or setup failed), or
+ * [`ETDL_ERR_NOT_COMPILED_IN`] if this library was built without the
+ * `exporter-otlp` feature.
+ */
+int32_t etdl_exporter_otlp_install(const char *endpoint);
 
 #endif  /* ETDL_RUNTIME_FFI_H */

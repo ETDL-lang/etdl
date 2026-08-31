@@ -25,6 +25,18 @@ struct CodegenCtx<'a> {
     fault_tree_probs: &'a BTreeMap<String, f64>,
     registry: &'a AsyncApiRegistry,
     message_ref: &'a etdl_parser::ast::MessageRef,
+    /// Parsed once per `generate_all` call (not per node — this walks and
+    /// validates the whole document) rather than re-parsed on every
+    /// barrier/operation visit. Empty (`fault_trees: vec![]`) for a
+    /// document that doesn't declare `etdl.live-reliability` — every
+    /// codegen site that consults it is then a no-op, producing the exact
+    /// same output as before this feature existed.
+    live_reliability: &'a crate::live_reliability::LiveReliabilityData,
+    /// Parsed once per `generate_all` call, same rationale as
+    /// `live_reliability` above. Empty (`budgets`/`barrier_checks: vec![]`)
+    /// for a document that doesn't declare `etdl.performance` — every
+    /// codegen site that consults it is then a no-op.
+    performance: &'a crate::performance::PerformanceData,
 }
 
 impl Default for RustCodeGenerator {
@@ -73,14 +85,36 @@ impl CodeGenerator for RustCodeGenerator {
         let constants = generate_fault_tree_constants(doc, fault_tree_probs);
         output.push_str(&constants);
 
-        for tree in doc.event_trees.values() {
+        let (live_reliability, _live_diagnostics) =
+            crate::live_reliability::parse_and_validate_live_reliability(doc);
+        // `_live_diagnostics` is deliberately ignored here: `Compiler::compile`
+        // only reaches codegen after `validate` has already run this same
+        // parse and reported any error — see `crate::lib::Compiler::compile`.
+        // Re-checking here would either silently duplicate those diagnostics
+        // or (worse) let codegen proceed on data validate already rejected.
+        let registration = generate_live_reliability_registration(doc, &live_reliability);
+        if !registration.is_empty() {
+            output.push_str(&registration);
+        }
+
+        // Same "already validated, diagnostics deliberately discarded"
+        // rationale as `live_reliability` above.
+        let (performance, _perf_diagnostics) = crate::performance::parse_and_validate_performance(doc);
+        let perf_registration = generate_performance_registration(doc, &performance);
+        if !perf_registration.is_empty() {
+            output.push_str(&perf_registration);
+        }
+
+        for (tree_id, tree) in &doc.event_trees {
             let ctx = CodegenCtx {
                 doc,
                 fault_tree_probs,
                 registry,
                 message_ref: &tree.initiating_event.message,
+                live_reliability: &live_reliability,
+                performance: &performance,
             };
-            let handler_code = generate_event_tree_handler(&ctx, tree)?;
+            let handler_code = generate_event_tree_handler(&ctx, tree_id, tree)?;
             output.push_str(&handler_code);
             output.push('\n');
         }
@@ -167,6 +201,408 @@ fn generate_fault_tree_constants(
     output
 }
 
+/// One `LiveFaultTreeBuilder` chain per fault tree declared under
+/// `x-live-reliability`, each guarded by a `std::sync::Once` so repeated
+/// handler calls register the structure exactly once and never reset
+/// accumulated live state. Emitted once, module-level — not per-handler —
+/// since a fault tree can be referenced by branches in more than one event
+/// tree.
+///
+/// Every basic event of the fault tree is included, not just the ones
+/// `x-live-reliability` explicitly lists: an entry there is an
+/// **override** (mainly to mark one `inbound`) — anything left out
+/// defaults to `local` with the standard prior strength, so a document
+/// only has to name the basic events it wants to say something special
+/// about. See `docs/reference/live-reliability.md`.
+fn generate_live_reliability_registration(
+    doc: &EtlDocument,
+    live_reliability: &crate::live_reliability::LiveReliabilityData,
+) -> String {
+    let mut output = String::new();
+
+    for decl in &live_reliability.fault_trees {
+        let Some(fault_tree) = doc.fault_trees.as_ref().and_then(|fts| fts.get(&decl.id)) else {
+            continue; // already an E-171 at validate time; codegen just skips it
+        };
+        let overrides: std::collections::HashMap<&str, &crate::live_reliability::LiveBasicEventDecl> =
+            decl.basic_events.iter().map(|e| (e.id.as_str(), e)).collect();
+
+        let snake = to_snake_case(&decl.id);
+        let once_name = to_upper_snake(&format!("etdl_live_init_{snake}"));
+        let fn_name = format!("etdl_ensure_live_{snake}_registered");
+
+        output.push_str(&format!(
+            "static {once_name}: std::sync::Once = std::sync::Once::new();\n"
+        ));
+        output.push_str(&format!("fn {fn_name}() {{\n"));
+        output.push_str(&format!("    {once_name}.call_once(|| {{\n"));
+        // `root_cause`, not `top_event.id` — `id` is a human-readable
+        // label never used for resolution anywhere else in this compiler
+        // (`fault_tree::compute_top_event_probability` looks values up by
+        // `root_cause` too, whether it names a gate or — with no gates at
+        // all — a basic event directly). Using `id` here would silently
+        // register a node nothing else ever points at.
+        output.push_str(&format!(
+            "        let _ = etdl_core::live::LiveFaultTreeBuilder::new({:?})\n",
+            fault_tree.top_event.root_cause
+        ));
+
+        for (be_id, be) in &fault_tree.basic_events {
+            match overrides.get(be_id.as_str()) {
+                Some(o) if o.source == "inbound" => {
+                    // Seeds the leaf's baseline from this document's own
+                    // declared probability — same field a `local` leaf's
+                    // declared value comes from — so `reliability.in_range`
+                    // has a fixed "normal" reference point independent of
+                    // whatever value an upstream service happens to send
+                    // first (see `etdl_core::live::LiveFaultTreeBuilder::inbound_leaf`).
+                    let declared_p = crate::fault_tree::compute_basic_event_probability(be)
+                        .unwrap_or(0.0);
+                    output.push_str(&format!(
+                        "            .inbound_leaf({be_id:?}, {declared_p:.6})\n"
+                    ));
+                }
+                Some(o) => {
+                    let declared_p = crate::fault_tree::compute_basic_event_probability(be)
+                        .unwrap_or(0.0); // already validated error-free by the time codegen runs
+                    output.push_str(&format!(
+                        "            .local_leaf({be_id:?}, {declared_p:.6}, {:.6})\n",
+                        o.prior_strength
+                    ));
+                }
+                None => {
+                    let declared_p = crate::fault_tree::compute_basic_event_probability(be)
+                        .unwrap_or(0.0);
+                    output.push_str(&format!(
+                        "            .local_leaf({be_id:?}, {declared_p:.6}, {:.6})\n",
+                        crate::live_reliability::default_prior_strength()
+                    ));
+                }
+            }
+        }
+
+        if let Some(gates) = &fault_tree.gates {
+            for (gate_id, gate) in gates {
+                let kind = live_gate_kind_expr(&gate.gate_type, gate.k);
+                let children = gate
+                    .inputs
+                    .iter()
+                    .map(|c| format!("{c:?}.to_string()"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                output.push_str(&format!(
+                    "            .gate({gate_id:?}, {kind}, vec![{children}])\n"
+                ));
+            }
+        }
+
+        output.push_str(&format!("            .register({:?});\n", decl.id));
+        output.push_str("    });\n");
+        output.push_str("}\n\n");
+    }
+
+    output
+}
+
+/// One `etdl_core::perf::register_budget` call per declared Budget, each
+/// guarded by a `std::sync::Once` — same idempotent-registration pattern
+/// `generate_live_reliability_registration` uses. Emitted once,
+/// module-level, regardless of which tree(s) the Budget's `nodeRef`
+/// actually applies to.
+fn generate_performance_registration(
+    _doc: &EtlDocument,
+    performance: &crate::performance::PerformanceData,
+) -> String {
+    let mut output = String::new();
+
+    for budget in &performance.budgets {
+        let snake = to_snake_case(&budget.id);
+        let once_name = to_upper_snake(&format!("etdl_perf_init_{snake}"));
+        let fn_name = format!("etdl_ensure_perf_{snake}_registered");
+
+        let max_concurrency = match budget.max_concurrency {
+            Some(n) => format!("Some({n})"),
+            None => "None".to_string(),
+        };
+        let expected_rate = match budget.expected_rate_per_second {
+            Some(r) => format!("Some({r:.6})"),
+            None => "None".to_string(),
+        };
+
+        output.push_str(&format!(
+            "static {once_name}: std::sync::Once = std::sync::Once::new();\n"
+        ));
+        output.push_str(&format!("fn {fn_name}() {{\n"));
+        output.push_str(&format!("    {once_name}.call_once(|| {{\n"));
+        output.push_str(&format!(
+            "        etdl_core::perf::register_budget({:?}, etdl_core::perf::BudgetSpec {{\n",
+            budget.id
+        ));
+        output.push_str(&format!("            p50_ms: {:.6},\n", budget.p50_ms));
+        output.push_str(&format!("            p95_ms: {:.6},\n", budget.p95_ms));
+        output.push_str(&format!("            p99_ms: {:.6},\n", budget.p99_ms));
+        output.push_str(&format!("            max_concurrency: {max_concurrency},\n"));
+        output.push_str(&format!(
+            "            expected_rate_per_second: {expected_rate},\n"
+        ));
+        output.push_str("        });\n");
+        output.push_str("    });\n");
+        output.push_str("}\n\n");
+    }
+
+    output
+}
+
+/// The first (declaration order) Budget whose `nodeRef` names `tree_id` as
+/// a whole (`#/eventTrees/<tree_id>`, no `/nodes/` component) — `None` if
+/// no such Budget is declared. Multiple Budgets on the same `nodeRef` is
+/// `W-413` (still valid, only one meaningfully authoritative) — this picks
+/// the first by declaration order, the same convention live-reliability
+/// already uses for multi-tree header attachment.
+fn performance_budget_for_whole_tree<'a>(
+    ctx: &'a CodegenCtx,
+    tree_id: &str,
+) -> Option<&'a crate::performance::Budget> {
+    let target = format!("#/eventTrees/{tree_id}");
+    ctx.performance.budgets.iter().find(|b| b.node_ref == target)
+}
+
+/// The first (declaration order) Budget whose `nodeRef` names this specific
+/// Operation node.
+fn performance_budget_for_operation<'a>(
+    ctx: &'a CodegenCtx,
+    tree_id: &str,
+    node_id: &str,
+) -> Option<&'a crate::performance::Budget> {
+    let target = format!("#/eventTrees/{tree_id}/nodes/{node_id}");
+    ctx.performance.budgets.iter().find(|b| b.node_ref == target)
+}
+
+/// The Budget id a Barrier's `barrierChecks` entry links it to, if any —
+/// the first (declaration order) `barrierChecks` entry whose `nodeRef`
+/// names this Barrier (`W-415`'s duplicate-nodeRef case: first wins, same
+/// convention as above).
+fn performance_budget_id_for_barrier<'a>(
+    ctx: &'a CodegenCtx,
+    tree_id: &str,
+    node_id: &str,
+) -> Option<&'a str> {
+    let target = format!("#/eventTrees/{tree_id}/nodes/{node_id}");
+    ctx.performance
+        .barrier_checks
+        .iter()
+        .find(|c| c.node_ref == target)
+        .map(|c| c.budget_ref.as_str())
+}
+
+/// The local variable name a Budget's `PerfGuard` is bound to — named
+/// per-budget (not a fixed name) so an Operation-level guard nested inside
+/// a whole-Event-Tree guard's scope never shadows it. Shadowing wouldn't
+/// actually be a correctness bug (each binding still drops at its own
+/// scope's end regardless of name reuse), but a distinct name reads far
+/// more clearly in generated output.
+fn perf_guard_var(budget_id: &str) -> String {
+    format!("__perf_guard_{}", to_snake_case(budget_id))
+}
+
+fn live_gate_kind_expr(gate_type: &etdl_parser::ast::GateType, k: Option<u32>) -> String {
+    use etdl_parser::ast::GateType;
+    match gate_type {
+        GateType::And => "etdl_core::live::LiveGateKind::And".to_string(),
+        GateType::Or => "etdl_core::live::LiveGateKind::Or".to_string(),
+        GateType::Not => "etdl_core::live::LiveGateKind::Not".to_string(),
+        GateType::Xor => "etdl_core::live::LiveGateKind::Xor".to_string(),
+        GateType::Voting => format!(
+            "etdl_core::live::LiveGateKind::Voting({})",
+            k.unwrap_or(1)
+        ),
+        GateType::Inhibit => "etdl_core::live::LiveGateKind::Inhibit".to_string(),
+        GateType::PriorityAnd => "etdl_core::live::LiveGateKind::PriorityAnd".to_string(),
+    }
+}
+
+/// The `(fault_tree_id, top_event_id, threshold)` triple for an internal
+/// reference, if it resolves to a fault tree declared under
+/// `x-live-reliability` — `None` otherwise (not live-tracked, or the
+/// pointer doesn't resolve — already an error by the time codegen runs, if
+/// so).
+fn live_reliability_triple_for_ref(
+    ctx: &CodegenCtx,
+    ps: &etdl_parser::ast::InternalRef,
+) -> Option<(String, String, f64)> {
+    let ft_id = extract_ft_id(&ps.pointer);
+    let fault_tree = ctx.doc.fault_trees.as_ref()?.get(&ft_id)?;
+    let decl = ctx.live_reliability.fault_trees.iter().find(|d| d.id == ft_id)?;
+    // See the matching comment in `generate_live_reliability_registration`:
+    // `root_cause`, not `top_event.id`, is the node identifier actually
+    // registered.
+    Some((ft_id, fault_tree.top_event.root_cause.clone(), decl.threshold))
+}
+
+fn live_reliability_triple_for_branch(
+    ctx: &CodegenCtx,
+    branch: &etdl_parser::ast::Branch,
+) -> Option<(String, String, f64)> {
+    branch
+        .probability_source
+        .as_ref()
+        .and_then(|ps| live_reliability_triple_for_ref(ctx, ps))
+}
+
+/// Renders the `record_branch` probability argument: the live current
+/// value (falling back to the compile-time constant on cold start) when
+/// this branch's fault tree is live-tracked, or just the constant
+/// otherwise — byte-identical to today's output in that case.
+fn render_record_branch_call(
+    ctx: &CodegenCtx,
+    branch: &etdl_parser::ast::Branch,
+    node_id: &str,
+    monitor_name: &str,
+    indent: &str,
+) -> String {
+    let Some(p) = get_branch_prob(branch, node_id, ctx.fault_tree_probs) else {
+        return String::new();
+    };
+    let prob_expr = match live_reliability_triple_for_branch(ctx, branch) {
+        Some((ft_id, top_event_id, _threshold)) => format!(
+            "etdl_core::live::current_probability({ft_id:?}, {top_event_id:?}).unwrap_or({p:.6})"
+        ),
+        None => format!("{p:.6}"),
+    };
+    format!(
+        "{indent}    {monitor_name}.record_branch(\"{node_id}\", \"{}\", {prob_expr});\n",
+        branch.outcome
+    )
+}
+
+/// Renders a branch's condition: `reliability.in_range == <bool>` and
+/// `performance.in_budget == <bool>` (the only shapes typeck's E-173/E-163
+/// permit for their respective roots, and only as the *entire* condition,
+/// never nested — see `typeck::check_bool_expr`'s `top_level` doc comment)
+/// become a direct `etdl_core::live::in_range`/`etdl_core::perf::in_budget`
+/// call; everything else renders exactly as before. Errors (not silently
+/// generates broken code) if the branch's own `probability_source`
+/// (reliability) or the enclosing barrier's own `x-performance.barrierChecks`
+/// entry (performance) doesn't resolve — this should be unreachable given
+/// typeck's E-173/E-163 already require the relevant supplement to be
+/// declared, but a codegen-level check stays defensive rather than
+/// trusting that alone.
+fn render_condition(
+    ctx: &CodegenCtx,
+    tree_id: &str,
+    node_id: &str,
+    branch: &etdl_parser::ast::Branch,
+) -> Result<String, String> {
+    if let Condition::Expr(ecel::BoolExpr::Comparison(cmp)) = &branch.condition {
+        if let Some(rendered) = try_render_reliability_condition(ctx, branch, cmp)? {
+            return Ok(rendered);
+        }
+        if let Some(rendered) = try_render_performance_condition(ctx, tree_id, node_id, cmp)? {
+            return Ok(rendered);
+        }
+    }
+    Ok(condition_to_rust_code(ctx, &branch.condition))
+}
+
+fn try_render_reliability_condition(
+    ctx: &CodegenCtx,
+    branch: &etdl_parser::ast::Branch,
+    cmp: &ecel::Comparison,
+) -> Result<Option<String>, String> {
+    fn is_reliability_path(op: &ecel::Operand) -> bool {
+        matches!(
+            op,
+            ecel::Operand::Value(ecel::ValueExpr::Path(p))
+                if matches!(p.segments.first(), Some(ecel::PathSegment::Field(s)) if s == "reliability")
+        )
+    }
+
+    let literal_side = if is_reliability_path(&cmp.left) {
+        &cmp.right
+    } else if is_reliability_path(&cmp.right) {
+        &cmp.left
+    } else {
+        return Ok(None);
+    };
+
+    let expect_true = match literal_side {
+        ecel::Operand::Literal(ecel::Literal::Bool(b)) => *b,
+        // typeck's V-204 already rejects comparing a Bool-typed path
+        // against anything but a bool literal — unreachable in practice.
+        _ => return Ok(None),
+    };
+    let negate = match cmp.op {
+        ecel::Comparator::Eq => !expect_true,
+        ecel::Comparator::Neq => expect_true,
+        _ => return Ok(None),
+    };
+
+    let Some((ft_id, top_event_id, threshold)) = live_reliability_triple_for_branch(ctx, branch)
+    else {
+        return Err(
+            "branch condition uses 'reliability.in_range' but its probability_source does not \
+             resolve to a fault tree declared under etdl.live-reliability"
+                .to_string(),
+        );
+    };
+
+    let call = format!("etdl_core::live::in_range({ft_id:?}, {top_event_id:?}, {threshold:.6})");
+    Ok(Some(if negate { format!("!{call}") } else { call }))
+}
+
+/// Mirrors `try_render_reliability_condition` exactly, for
+/// `performance.in_budget`: resolves the budget via the *enclosing
+/// barrier's own* `x-performance.barrierChecks` entry (`tree_id`/`node_id`
+/// are the barrier's, not the branch's — a branch has no node id of its
+/// own) rather than any field on the branch itself, since (unlike
+/// `probability_source`) there is no core AST field to read this from —
+/// see `performance_budget_id_for_barrier`'s doc comment.
+fn try_render_performance_condition(
+    ctx: &CodegenCtx,
+    tree_id: &str,
+    node_id: &str,
+    cmp: &ecel::Comparison,
+) -> Result<Option<String>, String> {
+    fn is_performance_path(op: &ecel::Operand) -> bool {
+        matches!(
+            op,
+            ecel::Operand::Value(ecel::ValueExpr::Path(p))
+                if matches!(p.segments.first(), Some(ecel::PathSegment::Field(s)) if s == "performance")
+        )
+    }
+
+    let literal_side = if is_performance_path(&cmp.left) {
+        &cmp.right
+    } else if is_performance_path(&cmp.right) {
+        &cmp.left
+    } else {
+        return Ok(None);
+    };
+
+    let expect_true = match literal_side {
+        ecel::Operand::Literal(ecel::Literal::Bool(b)) => *b,
+        // typeck's V-204 already rejects comparing a Bool-typed path
+        // against anything but a bool literal — unreachable in practice.
+        _ => return Ok(None),
+    };
+    let negate = match cmp.op {
+        ecel::Comparator::Eq => !expect_true,
+        ecel::Comparator::Neq => expect_true,
+        _ => return Ok(None),
+    };
+
+    let Some(budget_id) = performance_budget_id_for_barrier(ctx, tree_id, node_id) else {
+        return Err(
+            "branch condition uses 'performance.in_budget' but this barrier has no \
+             x-performance.barrierChecks entry naming it"
+                .to_string(),
+        );
+    };
+
+    let call = format!("etdl_core::perf::in_budget({budget_id:?})");
+    Ok(Some(if negate { format!("!{call}") } else { call }))
+}
+
 /// Resolve an `onFailureProbabilitySource` internal reference to its fault-tree
 /// top-event probability. The pointer is `#/faultTrees/<id>/topEvent`; the
 /// referenced fault-tree id selects the probability from the resolver output.
@@ -178,7 +614,40 @@ fn find_fault_tree_prob(
     fault_tree_probs.get(&ft_id).map(|&v| (ft_id.clone(), v))
 }
 
-fn generate_event_tree_handler(ctx: &CodegenCtx, tree: &EventTree) -> Result<String, String> {
+/// Renders the `Option<f64>` probability argument `record_success`/
+/// `record_failure` take: the live current value (falling back to the
+/// compile-time constant on cold start) when live-tracked, or just the
+/// constant wrapped in `Some` otherwise — byte-identical to today's output
+/// in that case. `"None"` if the reference doesn't resolve to a fault tree
+/// probability at all (unrelated to live tracking — the existing,
+/// unchanged behavior for a dangling/unsupported reference).
+fn render_prob_option_arg(
+    ctx: &CodegenCtx,
+    ps: &etdl_parser::ast::InternalRef,
+    node_id: &str,
+) -> String {
+    let Some((_, _p)) = find_fault_tree_prob(ps, ctx.fault_tree_probs) else {
+        return "None".to_string();
+    };
+    match live_reliability_triple_for_ref(ctx, ps) {
+        Some((ft_id, top_event_id, _threshold)) => {
+            let const_name = to_upper_snake(&format!("{node_id}_failure_probability"));
+            format!(
+                "Some(etdl_core::live::current_probability({ft_id:?}, {top_event_id:?}).unwrap_or({const_name}))"
+            )
+        }
+        None => {
+            let const_name = to_upper_snake(&format!("{node_id}_failure_probability"));
+            format!("Some({const_name})")
+        }
+    }
+}
+
+fn generate_event_tree_handler(
+    ctx: &CodegenCtx,
+    tree_id: &str,
+    tree: &EventTree,
+) -> Result<String, String> {
     let mut output = String::new();
 
     let fn_name = format!("handle_{}", to_snake_case(&tree.initiating_event.id));
@@ -188,6 +657,65 @@ fn generate_event_tree_handler(ctx: &CodegenCtx, tree: &EventTree) -> Result<Str
         "pub async fn {}(message: {}, publisher: &dyn Publisher) -> Result<(), WorkflowError> {{\n",
         fn_name, message_type
     ));
+
+    // Idempotent (guarded by a `std::sync::Once` each), so calling this on
+    // every invocation — not just once per process — is cheap and needs no
+    // separate app-side init step; the app just calls the handler as
+    // always. Emitted for every declared live-reliability fault tree
+    // regardless of whether *this* tree's own barriers reference it —
+    // simpler than walking the tree to find out, and a few extra
+    // already-registered checks cost nothing.
+    for decl in &ctx.live_reliability.fault_trees {
+        output.push_str(&format!(
+            "    etdl_ensure_live_{}_registered();\n",
+            to_snake_case(&decl.id)
+        ));
+    }
+    let has_inbound_leaf = ctx
+        .live_reliability
+        .fault_trees
+        .iter()
+        .any(|d| d.basic_events.iter().any(|e| e.source == "inbound"));
+    if has_inbound_leaf {
+        output.push_str(
+            "    if let Some(h) = &message.headers { etdl_core::live::apply_inbound(h); }\n",
+        );
+    }
+    if !ctx.live_reliability.fault_trees.is_empty() {
+        output.push('\n');
+    }
+
+    // Same idempotent-registration rationale as live reliability above, one
+    // call per declared Budget regardless of whether it applies to *this*
+    // tree.
+    for budget in &ctx.performance.budgets {
+        output.push_str(&format!(
+            "    etdl_ensure_perf_{}_registered();\n",
+            to_snake_case(&budget.id)
+        ));
+    }
+    if !ctx.performance.budgets.is_empty() {
+        output.push('\n');
+    }
+
+    // Whole-Event-Tree Budget: a local, RAII-released guard — `PerfGuard`'s
+    // `Drop` records latency and releases any concurrency/rate capacity no
+    // matter which of the handler's several exit points is taken (unlike
+    // the single-Operation case below, which has exactly one exit point
+    // and so can call `finish()` explicitly there instead). See
+    // `etdl_core::perf::PerfGuard`'s own doc comment.
+    if let Some(budget) = performance_budget_for_whole_tree(ctx, tree_id) {
+        // Named per-budget (not a fixed `__perf_guard`) so it never shadows
+        // an Operation-level guard nested inside this handler's body — both
+        // would otherwise compile fine (shadowing doesn't affect either
+        // binding's own Drop timing), but a distinct name reads far more
+        // clearly than two same-named bindings at different scopes.
+        output.push_str(&format!(
+            "    let {} = etdl_core::perf::enter({:?}).await;\n\n",
+            perf_guard_var(&budget.id),
+            budget.id
+        ));
+    }
 
     let first_barrier = find_first_barrier(tree);
     let monitor_name = first_barrier
@@ -201,7 +729,7 @@ fn generate_event_tree_handler(ctx: &CodegenCtx, tree: &EventTree) -> Result<Str
     ));
 
     let start_node_id = &tree.initiating_event.next;
-    let body = generate_node_code(ctx, tree, start_node_id, 1, &monitor_name)?;
+    let body = generate_node_code(ctx, tree_id, tree, start_node_id, 1, &monitor_name)?;
     output.push_str(&body);
 
     output.push_str("    Ok(())\n");
@@ -226,6 +754,7 @@ fn find_first_barrier(tree: &EventTree) -> Option<&str> {
 
 fn generate_node_code(
     ctx: &CodegenCtx,
+    tree_id: &str,
     tree: &EventTree,
     node_id: &str,
     depth: usize,
@@ -238,15 +767,18 @@ fn generate_node_code(
 
     match node {
         Node::Barrier(barrier) => {
-            generate_barrier_code(ctx, tree, node_id, barrier, depth, monitor_name)
+            generate_barrier_code(ctx, tree_id, tree, node_id, barrier, depth, monitor_name)
         }
-        Node::Operation(op) => generate_operation_code(ctx, tree, node_id, op, depth, monitor_name),
-        Node::Consequence(cons) => generate_consequence_code(cons, depth),
+        Node::Operation(op) => {
+            generate_operation_code(ctx, tree_id, tree, node_id, op, depth, monitor_name)
+        }
+        Node::Consequence(cons) => generate_consequence_code(ctx, cons, depth),
     }
 }
 
 fn generate_barrier_code(
     ctx: &CodegenCtx,
+    tree_id: &str,
     tree: &EventTree,
     node_id: &str,
     barrier: &etdl_parser::ast::Barrier,
@@ -259,58 +791,60 @@ fn generate_barrier_code(
     for (i, branch) in barrier.branches.iter().enumerate() {
         if i == 0 {
             if branch.condition == Condition::Default {
-                let prob = get_branch_prob(branch, node_id, ctx.fault_tree_probs);
-                if let Some(p) = prob {
-                    output.push_str(&format!(
-                        "{}    {}.record_branch(\"{}\", {:.6});\n",
-                        indent, monitor_name, branch.outcome, p
-                    ));
-                }
-                let body = generate_node_code(ctx, tree, &branch.next, depth + 1, monitor_name)?;
+                output.push_str(&render_record_branch_call(
+                    ctx,
+                    branch,
+                    node_id,
+                    monitor_name,
+                    &indent,
+                ));
+                let body =
+                    generate_node_code(ctx, tree_id, tree, &branch.next, depth + 1, monitor_name)?;
                 output.push_str(&body);
             } else {
-                let cond = condition_to_rust_code(ctx, &branch.condition);
+                let cond = render_condition(ctx, tree_id, node_id, branch)?;
                 output.push_str(&format!("{}if {} {{\n", indent, cond));
 
-                let prob = get_branch_prob(branch, node_id, ctx.fault_tree_probs);
-                if let Some(p) = prob {
-                    output.push_str(&format!(
-                        "{}    {}.record_branch(\"{}\", {:.6});\n",
-                        indent, monitor_name, branch.outcome, p
-                    ));
-                }
+                output.push_str(&render_record_branch_call(
+                    ctx,
+                    branch,
+                    node_id,
+                    monitor_name,
+                    &indent,
+                ));
 
-                let body = generate_node_code(ctx, tree, &branch.next, depth + 1, monitor_name)?;
+                let body =
+                    generate_node_code(ctx, tree_id, tree, &branch.next, depth + 1, monitor_name)?;
                 output.push_str(&body);
                 output.push_str(&format!("{}}}", indent));
             }
         } else if branch.condition == Condition::Default {
             output.push_str(" else {\n");
 
-            let prob = get_branch_prob(branch, node_id, ctx.fault_tree_probs);
-            if let Some(p) = prob {
-                output.push_str(&format!(
-                    "{}    {}.record_branch(\"{}\", {:.6});\n",
-                    indent, monitor_name, branch.outcome, p
-                ));
-            }
+            output.push_str(&render_record_branch_call(
+                ctx,
+                branch,
+                node_id,
+                monitor_name,
+                &indent,
+            ));
 
-            let body = generate_node_code(ctx, tree, &branch.next, depth + 1, monitor_name)?;
+            let body = generate_node_code(ctx, tree_id, tree, &branch.next, depth + 1, monitor_name)?;
             output.push_str(&body);
             output.push_str(&format!("{}}}\n", indent));
         } else {
-            let cond = condition_to_rust_code(ctx, &branch.condition);
+            let cond = render_condition(ctx, tree_id, node_id, branch)?;
             output.push_str(&format!(" else if {} {{\n", cond));
 
-            let prob = get_branch_prob(branch, node_id, ctx.fault_tree_probs);
-            if let Some(p) = prob {
-                output.push_str(&format!(
-                    "{}    {}.record_branch(\"{}\", {:.6});\n",
-                    indent, monitor_name, branch.outcome, p
-                ));
-            }
+            output.push_str(&render_record_branch_call(
+                ctx,
+                branch,
+                node_id,
+                monitor_name,
+                &indent,
+            ));
 
-            let body = generate_node_code(ctx, tree, &branch.next, depth + 1, monitor_name)?;
+            let body = generate_node_code(ctx, tree_id, tree, &branch.next, depth + 1, monitor_name)?;
             output.push_str(&body);
             output.push_str(&format!("{}}}", indent));
         }
@@ -321,6 +855,7 @@ fn generate_barrier_code(
 
 fn generate_operation_code(
     ctx: &CodegenCtx,
+    tree_id: &str,
     tree: &EventTree,
     node_id: &str,
     op: &etdl_parser::ast::Operation,
@@ -331,29 +866,84 @@ fn generate_operation_code(
     let mut output = String::new();
 
     let handler_name = to_snake_case(&op.handler);
-    let timeout = op.timeout_ms.unwrap_or(5000);
+    // A Budget's `p99Ms` only fills the gap when the Operation declares no
+    // explicit `timeoutMs` — an explicit value always wins (spec Section
+    // 6.2). `.round()` since `timeoutMs`/the retry-loop timeout are both
+    // whole milliseconds, while a Budget's percentile fields are `f64`.
+    let budget = performance_budget_for_operation(ctx, tree_id, node_id);
+    let timeout = op
+        .timeout_ms
+        .unwrap_or_else(|| budget.map(|b| b.p99_ms.round() as u64).unwrap_or(5000));
 
-    if let Some(ref retry) = op.retry_policy {
-        let strategy = match retry
-            .backoff_strategy
-            .as_ref()
-            .unwrap_or(&BackoffStrategy::Fixed)
-        {
-            BackoffStrategy::Exponential => "BackoffStrategy::Exponential",
-            BackoffStrategy::Fixed => "BackoffStrategy::Fixed",
-        };
+    if let Some(budget) = budget {
         output.push_str(&format!(
-            "{}let retry = RetryPolicy {{\n\
-             {}    max_attempts: {},\n\
-             {}    backoff_ms: {},\n\
-             {}    strategy: {},\n\
-             {}}};\n",
-            indent, indent, retry.max_attempts, indent, retry.backoff_ms, indent, strategy, indent
+            "{}let {} = etdl_core::perf::enter({:?}).await;\n",
+            indent,
+            perf_guard_var(&budget.id),
+            budget.id
         ));
-        output.push_str(&format!(
-            "{}match retry.execute(|| {}(&message), Duration::from_millis({})).await {{\n",
-            indent, handler_name, timeout
-        ));
+    }
+
+    match (&op.retry_policy, budget) {
+        (Some(retry), _) => {
+            let strategy = match retry
+                .backoff_strategy
+                .as_ref()
+                .unwrap_or(&BackoffStrategy::Fixed)
+            {
+                BackoffStrategy::Exponential => "BackoffStrategy::Exponential",
+                BackoffStrategy::Fixed => "BackoffStrategy::Fixed",
+            };
+            output.push_str(&format!(
+                "{}let retry = RetryPolicy {{\n\
+                 {}    max_attempts: {},\n\
+                 {}    backoff_ms: {},\n\
+                 {}    strategy: {},\n\
+                 {}}};\n",
+                indent, indent, retry.max_attempts, indent, retry.backoff_ms, indent, strategy, indent
+            ));
+        }
+        (None, Some(_budget)) => {
+            // No explicit `retryPolicy`, but a Budget applies — synthesize
+            // a single-attempt policy purely to gain the timeout wrapper
+            // below (`retry.execute` is the only mechanism this codegen has
+            // for enforcing a timeout at all; without this, a Budget's
+            // `p99Ms` would silently enforce nothing, exactly the gap
+            // `docs/reference/performance-supplement.md` Section 6.2 closes).
+            output.push_str(&format!(
+                "{}let retry = RetryPolicy {{\n\
+                 {}    max_attempts: 1,\n\
+                 {}    backoff_ms: 0,\n\
+                 {}    strategy: BackoffStrategy::Fixed,\n\
+                 {}}};\n",
+                indent, indent, indent, indent, indent
+            ));
+        }
+        (None, None) => {}
+    }
+
+    if op.retry_policy.is_some() || budget.is_some() {
+        if let Some(budget) = budget {
+            // Bound to a local first (rather than matched directly) so
+            // `.finish()` can run exactly once, right when the call
+            // completes — before either arm below, not tied to whichever
+            // arm happens to execute.
+            output.push_str(&format!(
+                "{}let __perf_call_result = retry.execute(|| {}(&message), Duration::from_millis({})).await;\n",
+                indent, handler_name, timeout
+            ));
+            output.push_str(&format!(
+                "{}{}.finish();\n",
+                indent,
+                perf_guard_var(&budget.id)
+            ));
+            output.push_str(&format!("{}match __perf_call_result {{\n", indent));
+        } else {
+            output.push_str(&format!(
+                "{}match retry.execute(|| {}(&message), Duration::from_millis({})).await {{\n",
+                indent, handler_name, timeout
+            ));
+        }
     } else {
         output.push_str(&format!(
             "{}match {}(&message).await {{\n",
@@ -372,29 +962,21 @@ fn generate_operation_code(
     // `BranchMonitor::record_success`'s doc comment.
     if op.on_failure.is_some() {
         if let Some(ref ps) = op.on_failure_probability_source {
-            let const_name = to_upper_snake(&format!("{}_failure_probability", node_id));
-            let prob_exists = find_fault_tree_prob(ps, ctx.fault_tree_probs).is_some();
-            if prob_exists {
-                output.push_str(&format!(
-                    "{}        {}.record_success(\"{}\", Some({}));\n",
-                    indent, monitor_name, node_id, const_name
-                ));
-            } else {
-                output.push_str(&format!(
-                    "{}        {}.record_success(\"{}\", None);\n",
-                    indent, monitor_name, node_id
-                ));
-            }
+            let prob_arg = render_prob_option_arg(ctx, ps, node_id);
+            output.push_str(&format!(
+                "{}        {}.record_success(\"{}\", {});\n",
+                indent, monitor_name, node_id, prob_arg
+            ));
         }
     }
 
     let next_node = tree.nodes.get(&op.next);
     match next_node {
         Some(Node::Consequence(cons)) => {
-            emit_send(cons, "_result", &indent, &mut output);
+            emit_send(ctx, cons, "_result", &indent, &mut output);
         }
         Some(_) => {
-            generate_node_code(ctx, tree, &op.next, depth + 2, monitor_name)
+            generate_node_code(ctx, tree_id, tree, &op.next, depth + 2, monitor_name)
                 .map(|body| output.push_str(&body))?;
         }
         None => {}
@@ -405,34 +987,22 @@ fn generate_operation_code(
     if let Some(ref _on_failure_id) = op.on_failure {
         output.push_str(&format!("{}    Err(err) => {{\n", indent));
 
-        if let Some(ref ps) = op.on_failure_probability_source {
-            let const_name = to_upper_snake(&format!("{}_failure_probability", node_id));
-            let prob_exists = find_fault_tree_prob(ps, ctx.fault_tree_probs).is_some();
-            if prob_exists {
-                output.push_str(&format!(
-                    "{}        {}.record_failure(\"{}\", &err, Some({}));\n",
-                    indent, monitor_name, node_id, const_name
-                ));
-            } else {
-                output.push_str(&format!(
-                    "{}        {}.record_failure(\"{}\", &err, None);\n",
-                    indent, monitor_name, node_id
-                ));
-            }
-        } else {
-            output.push_str(&format!(
-                "{}        {}.record_failure(\"{}\", &err, None);\n",
-                indent, monitor_name, node_id
-            ));
-        }
+        let prob_arg = match &op.on_failure_probability_source {
+            Some(ps) => render_prob_option_arg(ctx, ps, node_id),
+            None => "None".to_string(),
+        };
+        output.push_str(&format!(
+            "{}        {}.record_failure(\"{}\", &err, {});\n",
+            indent, monitor_name, node_id, prob_arg
+        ));
 
         let on_failure_id = op.on_failure.as_ref().unwrap();
         match tree.nodes.get(on_failure_id) {
             Some(Node::Consequence(cons)) => {
-                emit_send(cons, "message", &indent, &mut output);
+                emit_send(ctx, cons, "message", &indent, &mut output);
             }
             _ => {
-                generate_node_code(ctx, tree, on_failure_id, depth + 2, monitor_name)
+                generate_node_code(ctx, tree_id, tree, on_failure_id, depth + 2, monitor_name)
                     .map(|body| output.push_str(&body))?;
             }
         }
@@ -450,8 +1020,17 @@ fn generate_operation_code(
     Ok(output)
 }
 
-/// Emit a `publisher.publish(...)` call for a `send` consequence.
+/// Emit a `publisher.publish(...)`/`publish_with_headers(...)` call for a
+/// `send` consequence. Uses `publish_with_headers` (see
+/// `etdl_core::publisher::Publisher`'s additive method) only when the
+/// document has at least one `local`-sourced live-tracked fault tree —
+/// otherwise identical to today's plain `publish(...)` call. Multiple
+/// declared trees: only the first (declaration order) is attached — see
+/// `docs/reference/live-reliability.md`'s known-limitation note; merging
+/// more than one into a single outgoing message is a follow-up, not built
+/// here.
 fn emit_send(
+    ctx: &CodegenCtx,
     cons: &etdl_parser::ast::Consequence,
     payload_expr: &str,
     indent: &str,
@@ -461,9 +1040,12 @@ fn emit_send(
         etdl_parser::ast::ConsequenceOperation::Send => {
             if let Some(ref channel_ref) = cons.channel {
                 let channel_name = channel_ref_name(channel_ref);
-                output.push_str(&format!(
-                    "{}        publisher.publish(\"{}\", &etdl_core::serde_json::to_value({}).map_err(|e| WorkflowError::new(format!(\"{{}}\", e)))?)?;\n",
-                    indent, channel_name, payload_expr
+                output.push_str(&render_publish_call(
+                    ctx,
+                    &channel_name,
+                    payload_expr,
+                    indent,
+                    "        ",
                 ));
             }
         }
@@ -472,6 +1054,7 @@ fn emit_send(
 }
 
 fn generate_consequence_code(
+    ctx: &CodegenCtx,
     cons: &etdl_parser::ast::Consequence,
     depth: usize,
 ) -> Result<String, String> {
@@ -482,19 +1065,20 @@ fn generate_consequence_code(
         etdl_parser::ast::ConsequenceOperation::Send => {
             if let Some(ref channel_ref) = cons.channel {
                 let channel_name = channel_ref_name(channel_ref);
-                output.push_str(&format!(
-                    "{}publisher.publish(\"{}\", &etdl_core::serde_json::to_value(message).map_err(|e| WorkflowError::new(format!(\"{{}}\", e)))?)?;\n",
-                    indent, channel_name
-                ));
+                output.push_str(&render_publish_call(ctx, &channel_name, "message", &indent, ""));
             }
         }
         etdl_parser::ast::ConsequenceOperation::Terminate => {}
     }
 
-    if depth == 1 {
-        output.push_str(&format!("{}Ok(())\n", indent));
-    }
-
+    // No trailing `Ok(())` here even at depth 1 (a Consequence reached
+    // directly from `initiatingEvent.next`, with no Barrier in between):
+    // `generate_event_tree_handler` always appends its own final `Ok(())`
+    // after the whole body, for every call path (barrier branches,
+    // operations via `emit_send`, and this one). A second one emitted here
+    // used to collide with it — the first, meant as a tail expression, had
+    // no trailing `;`, producing a parse error the moment any fixture
+    // actually exercised this depth-1 path.
     Ok(output)
 }
 
@@ -1041,6 +1625,58 @@ fn channel_ref_name(channel_ref: &etdl_parser::ast::ChannelRef) -> String {
     }
 }
 
+/// The id of the first (declaration order) live-tracked fault tree that
+/// has at least one basic event this service observes locally — i.e. one
+/// not explicitly overridden to `inbound` in `x-live-reliability` (an
+/// un-listed basic event defaults to `local`, so this is *not* simply
+/// "has a `basicEvents` entry with `source: local`"). `None` if no
+/// declared fault tree has any local data worth sharing (every basic
+/// event is `inbound`, or no supplement declared at all).
+fn first_local_live_fault_tree<'a>(ctx: &'a CodegenCtx) -> Option<&'a str> {
+    for decl in &ctx.live_reliability.fault_trees {
+        let Some(fault_tree) = ctx.doc.fault_trees.as_ref().and_then(|fts| fts.get(&decl.id)) else {
+            continue;
+        };
+        let inbound_ids: std::collections::HashSet<&str> = decl
+            .basic_events
+            .iter()
+            .filter(|e| e.source == "inbound")
+            .map(|e| e.id.as_str())
+            .collect();
+        let has_local = fault_tree
+            .basic_events
+            .keys()
+            .any(|id| !inbound_ids.contains(id.as_str()));
+        if has_local {
+            return Some(decl.id.as_str());
+        }
+    }
+    None
+}
+
+/// Renders one `publisher.publish(...)`/`publish_with_headers(...)` call.
+/// `extra_indent` reproduces `emit_send`'s historical extra nesting level
+/// relative to `generate_consequence_code`'s call (both existed before
+/// this function unified them; kept so output stays byte-identical for a
+/// document that doesn't declare `etdl.live-reliability`).
+fn render_publish_call(
+    ctx: &CodegenCtx,
+    channel_name: &str,
+    payload_expr: &str,
+    indent: &str,
+    extra_indent: &str,
+) -> String {
+    let to_value_expr = format!(
+        "&etdl_core::serde_json::to_value({payload_expr}).map_err(|e| WorkflowError::new(format!(\"{{}}\", e)))?"
+    );
+    match first_local_live_fault_tree(ctx) {
+        Some(ft_id) => format!(
+            "{indent}{extra_indent}publisher.publish_with_headers(\"{channel_name}\", {to_value_expr}, &etdl_core::live::outbound_snapshot({ft_id:?}))?;\n"
+        ),
+        None => format!("{indent}{extra_indent}publisher.publish(\"{channel_name}\", {to_value_expr})?;\n"),
+    }
+}
+
 fn extract_last_segment_str(pointer: &str) -> String {
     let parts: Vec<&str> = pointer.split('/').collect();
     let last = parts.last().unwrap_or(&"Unknown");
@@ -1250,11 +1886,21 @@ fn extract_ft_id(pointer: &str) -> String {
         .to_string()
 }
 
+/// Also normalizes `-` and ` ` to `_` (not just uppercase-boundary
+/// insertion) — user-supplied ids (Budget/BarrierCheck ids in particular;
+/// unlike fault-tree/node ids, nothing in the schema restricts a Budget
+/// `id`'s characters) are otherwise free to contain a hyphen, which is not
+/// a valid Rust identifier character and would previously pass straight
+/// through unchanged into a generated `static`/`fn` name, producing code
+/// that fails to compile. Never inserts a doubled `_` at a hyphen-then-
+/// uppercase boundary (e.g. `"op-Budget"` → `op_budget`, not `op__budget`).
 fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
     for (i, c) in s.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
+        if c == '-' || c == ' ' {
+            result.push('_');
+        } else if c.is_uppercase() {
+            if i > 0 && !result.ends_with('_') {
                 result.push('_');
             }
             result.push(c.to_lowercase().next().unwrap());
@@ -1392,11 +2038,15 @@ faultTrees:
     fn render(condition_src: &str) -> String {
         let cond = etdl_parser::ecel::parse_condition(condition_src).unwrap();
         let (doc, probs, registry, message_ref) = test_fixture();
+        let live_reliability = crate::live_reliability::LiveReliabilityData::default();
+        let performance = crate::performance::PerformanceData::default();
         let ctx = CodegenCtx {
             doc: &doc,
             fault_tree_probs: &probs,
             registry: &registry,
             message_ref: &message_ref,
+            live_reliability: &live_reliability,
+            performance: &performance,
         };
         condition_to_rust_code(&ctx, &cond)
     }
@@ -1542,5 +2192,27 @@ faultTrees:
     fn explicit_all_lowers_to_iter_all() {
         let code = render("all(message.payload.items, message.payload.items[*].qty > 0)");
         assert!(code.contains(".iter().all(|item|"), "got: {}", code);
+    }
+
+    // --- to_snake_case: hyphens must become valid Rust identifiers ---
+
+    #[test]
+    fn to_snake_case_converts_hyphens_to_underscores() {
+        assert_eq!(to_snake_case("op-budget"), "op_budget");
+    }
+
+    #[test]
+    fn to_snake_case_does_not_double_underscore_at_hyphen_then_uppercase() {
+        assert_eq!(to_snake_case("op-Budget"), "op_budget");
+    }
+
+    #[test]
+    fn to_snake_case_still_handles_pascal_case_as_before() {
+        assert_eq!(to_snake_case("GatewayFailure"), "gateway_failure");
+    }
+
+    #[test]
+    fn to_upper_snake_converts_hyphens_too() {
+        assert_eq!(to_upper_snake("op-budget"), "OP_BUDGET");
     }
 }

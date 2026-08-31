@@ -324,9 +324,21 @@ fn parse_path_expr(input: &str) -> IResult<&str, PathExpr> {
     Ok((input, PathExpr::new(all_segments)))
 }
 
+/// `message` is the ordinary root every path expression has always used.
+/// `reliability` and `performance` are narrower roots two optional,
+/// off-by-default supplements each reserve — grammar-wise both parse like
+/// any other path (`reliability.in_range`, `performance.in_budget`,
+/// generic dotted chains), but only their one specific exact shape is
+/// meaningful; anything else under either root is a type error reported by
+/// `etdl-compiler::typeck`, not a parse error, matching how this codebase
+/// already prefers "structure via grammar, rules via explicit checks" over
+/// rejecting shapes at parse time.
 fn parse_root_var(input: &str) -> IResult<&str, String> {
-    let (input, _) = tag("message")(input)?;
-    Ok((input, "message".to_string()))
+    alt((
+        value("message".to_string(), tag("message")),
+        value("reliability".to_string(), tag("reliability")),
+        value("performance".to_string(), tag("performance")),
+    ))(input)
 }
 
 fn parse_member_access(input: &str) -> IResult<&str, PathSegment> {
@@ -505,6 +517,63 @@ mod tests {
                 match &c.right {
                     Operand::Literal(Literal::String(s)) => assert_eq!(s, "ok"),
                     _ => panic!("expected string literal"),
+                }
+            }
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn test_reliability_root_parses_like_any_other_path() {
+        // Grammar-level only: parses generically under the new `reliability`
+        // root exactly like `message.*` paths always have. Whether
+        // `reliability.in_range` specifically is meaningful (vs. any other
+        // suffix under this root) is `etdl-compiler::typeck`'s job, not the
+        // parser's — see `parse_root_var`'s doc comment.
+        let cond = parse_condition("reliability.in_range == true").unwrap();
+        match cond {
+            Condition::Expr(expr) => {
+                let c = as_comparison(&expr);
+                assert_eq!(c.op, Comparator::Eq);
+                match &c.left {
+                    Operand::Value(ValueExpr::Path(p)) => {
+                        assert_eq!(p.segments.len(), 2);
+                        assert_eq!(p.segments[0], PathSegment::Field("reliability".to_string()));
+                        assert_eq!(p.segments[1], PathSegment::Field("in_range".to_string()));
+                    }
+                    _ => panic!("expected path"),
+                }
+                match &c.right {
+                    Operand::Literal(Literal::Bool(b)) => assert!(*b),
+                    _ => panic!("expected bool literal"),
+                }
+            }
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn test_performance_root_parses_like_any_other_path() {
+        // Grammar-level only, mirroring the `reliability` root test above:
+        // `performance.in_budget` (the Performance Supplement's own
+        // `barrierChecks`-linked ECEL path) parses generically, no special
+        // grammar case — see `parse_root_var`'s doc comment.
+        let cond = parse_condition("performance.in_budget == true").unwrap();
+        match cond {
+            Condition::Expr(expr) => {
+                let c = as_comparison(&expr);
+                assert_eq!(c.op, Comparator::Eq);
+                match &c.left {
+                    Operand::Value(ValueExpr::Path(p)) => {
+                        assert_eq!(p.segments.len(), 2);
+                        assert_eq!(p.segments[0], PathSegment::Field("performance".to_string()));
+                        assert_eq!(p.segments[1], PathSegment::Field("in_budget".to_string()));
+                    }
+                    _ => panic!("expected path"),
+                }
+                match &c.right {
+                    Operand::Literal(Literal::Bool(b)) => assert!(*b),
+                    _ => panic!("expected bool literal"),
                 }
             }
             _ => panic!("expected comparison"),

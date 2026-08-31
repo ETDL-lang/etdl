@@ -25,7 +25,7 @@ this page for completeness. Publish order for the in-workspace crates
 | `etdl-reliability-core` | Built-in reliability types (`ProbabilityEstimate`, `ReliabilityArtifact`) the compiler depends on |
 | `etdl-conformance` | Conformance, verification & validation framework — see `docs/reference/conformance-framework.md` |
 | `etdl-supplement-sdk` | SDK for authoring third-party supplement plugins as sandboxed `.wasm` modules — see below and [supplement-plugins.md](supplement-plugins.md) |
-| `etdl-runtime-ffi` | Stable, versioned C ABI over `etdl-core`; what every non-Rust `--target` binding actually calls. No toolchain of its own to build; `cargo build -p etdl-runtime-ffi --release` |
+| `etdl-runtime-ffi` | Stable, versioned C ABI over `etdl-core`; what every non-Rust `--target` binding actually calls, including the `etdl_exporter_*_install` functions (see [Observability Exporters](observability-exporters.md)). No toolchain of its own to build; `cargo build -p etdl-runtime-ffi --release` |
 
 Crates that used to live in this workspace and now live elsewhere, pulled in
 by `etdl-cli`/`etdl-conformance` as git dependencies (each still Apache 2.0
@@ -43,8 +43,12 @@ crate — verify directly before relying on it.
 
 `etdl-probability-core` — `std.probability`'s native layer: `Probability`,
 `Rate`, composition math (complement, independent AND/OR, conditional,
-Bayes), and five distributions (Bernoulli, Binomial, Beta, Exponential,
-Normal). Zero dependency on any reliability crate by construction. See
+Bayes), five distributions (Bernoulli, Binomial, Beta, Exponential,
+Normal), and (`gate` module) fault-tree gate combinators (`not`, `xor`,
+`k_of_n`, `inhibit`, `priority_and`) shared by `etdl-compiler::fault_tree`'s
+compile-time resolution and `etdl-core::live`'s runtime recombination — one
+implementation of "how a gate combines probabilities," never two that could
+drift. Zero dependency on any reliability crate by construction. See
 [standard-probability-library.md](standard-probability-library.md).
 
 `etdl-tree-core` — the Generic Tree Event Supplement's native layer:
@@ -80,19 +84,20 @@ with the rest of `etdl-reliability` (`reliability` cargo feature). See
   cycle/version diagnostics). See [standard-library.md](standard-library.md).
 - `extension::{EtdlExtension, ExtensionContext, ExtensionRegistry, ExtensionResult}` —
   the generic supplement-extension mechanism (mirrors the ETDL specification's
-  Section 11.3 validate/process lifecycle). Six built-in extensions are
+  Section 11.3 validate/process lifecycle). Seven built-in extensions are
   registered in `extension::builtin_registry()`: `etdl.reliability` and
   `etdl.tree-event` are each additionally wired into `Compiler` internally
   via their own special-cased direct call; `etdl.performance`, `etdl.safety`,
-  `etdl.diagnostics`, and `etdl.security` instead run through the same
-  generic, registry-driven path `Compiler::with_extension` uses
-  (`Compiler::new()` seeds `Compiler::extensions` with all four) — the
+  `etdl.diagnostics`, `etdl.security`, and `etdl.live-reliability` instead
+  run through the same generic, registry-driven path `Compiler::with_extension`
+  uses (`Compiler::new()` seeds `Compiler::extensions` with all five) — the
   preferred shape for a new core supplement going forward, since it needs no
   bespoke pipeline code of its own. See each module's own docs,
   [performance-supplement.md](performance-supplement.md),
   [safety-supplement.md](safety-supplement.md),
-  [diagnostics-supplement.md](diagnostics-supplement.md), and
-  [security-supplement.md](security-supplement.md). A caller registers an
+  [diagnostics-supplement.md](diagnostics-supplement.md),
+  [security-supplement.md](security-supplement.md), and
+  [live-reliability.md](live-reliability.md). A caller registers an
   *additional*, non-built-in extension — for example, a third-party,
   non-core supplement (specification Section 11.4) such as a future
   `etdl.chain` implementation — with
@@ -111,9 +116,13 @@ with the rest of `etdl-reliability` (`reliability` cargo feature). See
   diagnostic isn't duplicated by `process()` re-running validation
   (`run_extensions` only skips `process()` after an *error*, not a warning).
 - `performance` — the Performance Supplement (`etdl.performance`): declared
-  latency percentile budgets and throughput expectations against existing
-  Operation/Event Tree nodes, purely declarative (no runtime enforcement, no
-  probability math). See [performance-supplement.md](performance-supplement.md).
+  latency percentile budgets and concurrency/throughput requirements
+  against existing Operation/Event Tree nodes — structurally enforced
+  (`etdl_core::perf`: a real concurrency semaphore, a `p99Ms`-derived
+  timeout fallback, an async token-bucket rate limiter) and live-validated
+  by a linked core Barrier via ECEL's `performance.in_budget`
+  (`x-performance.barrierChecks`, no core AST change). No fault-tree
+  probability math. See [performance-supplement.md](performance-supplement.md).
 - `safety` — the Safety Supplement (`etdl.safety`): hazard classification
   against a fixed severity/likelihood risk matrix, and Safety Integrity
   Level/independence declarations on existing core Barrier nodes; no new
@@ -126,6 +135,19 @@ with the rest of `etdl-reliability` (`reliability` cargo feature). See
   attack trees (reusing `etdl.tree-event`'s `Tree` structure — the one
   built-in supplement with a real cross-supplement dependency) and Controls
   mapped onto core Barrier nodes. See [security-supplement.md](security-supplement.md).
+- `live_reliability` — the Live Reliability Supplement (`etdl.live-reliability`):
+  opt-in, decentralized, per-process live recomputation of a fault tree's
+  probabilities at runtime (Beta-Binomial online estimation for basic
+  events, the same `etdl-probability-core::gate` math for gate
+  recombination), able to drive a Barrier's branch selection via ECEL's
+  `reliability.in_range` and to propagate across services by attaching
+  current values to outgoing message headers — the one deliberate,
+  explicit exception to "runtime observations never change compiled
+  probabilities" (see [runtime-feedback-calibration.md](../reliability/runtime-feedback-calibration.md)).
+  Parsing/typeck/codegen live in `etdl-compiler` unconditionally; the
+  actual runtime engine (`etdl_core::live`) is behind `etdl-core`'s
+  `live-reliability` Cargo feature (off by default) — see
+  [live-reliability.md](live-reliability.md).
 
 ## etdl-core
 
@@ -134,6 +156,26 @@ with the rest of `etdl-reliability` (`reliability` cargo feature). See
 - `sla::SlaTracker` — rolling-window anomaly detection (`ETDL_SLA_WINDOW`, `ETDL_SLA_THRESHOLD`)
 - `chaos::ChaosController` — seeded, scoped failure injection, production guard (`ETDL_CHAOS`, `ETDL_CHAOS_SEED`, `ETDL_CHAOS_SCOPE`, `ETDL_ENV`)
 - `telemetry` — `inject_traceparent` W3C trace context, anomaly events, node span attributes
+- `exporters` — optional, off-by-default observability exporters
+  (`exporter-prometheus`/`-loki`/`-otlp` features) for `BranchMonitor`'s
+  runtime observations — see
+  [Observability Exporters](observability-exporters.md)
+- `live` — optional (`live-reliability` feature) process-wide live fault-tree
+  engine: `record_observation`, `current_probability`, `in_range`,
+  `outbound_snapshot`/`apply_inbound` for cross-service propagation — the
+  runtime half of the `etdl.live-reliability` supplement, called from
+  generated code only when a document declares it. See
+  [Live Reliability](live-reliability.md)
+- `publisher::Publisher::publish_with_headers` — additive method (default
+  delegates to `publish`, ignoring headers) generated code uses to attach a
+  fault tree's `outbound_snapshot` to an outgoing message; `ChannelCapturingPublisher`
+  records the headers actually attached (`sent_with_headers`/`headers_sent_to`)
+- `perf` — always-on (no feature gate) live enforcement/observation engine
+  for the `etdl.performance` supplement: `register_budget`, `enter`/
+  `PerfGuard::finish` (a real `tokio::sync::Semaphore`-backed concurrency
+  block and an async token-bucket rate limiter), `in_budget` — called from
+  generated code only when a document declares a Budget/`barrierChecks`
+  entry. See [Performance Supplement](performance-supplement.md)
 
 ## etdl-cli
 
@@ -168,8 +210,8 @@ Source-position support lives in `etdl-parser::spanned` (a `SpanIndex` built wit
 ## etdl-supplement-sdk
 
 SDK for writing ETDL supplement plugins — dynamically loaded, sandboxed
-`wasm32-unknown-unknown` modules that `etdl-cli` (built with its optional
-`plugins` Cargo feature) runs via `etdl supplement install`. A Rust author
+`wasm32-unknown-unknown` modules that `etdl-cli` runs via `etdl install`
+(always compiled in, not feature-gated). A Rust author
 implements the `Supplement` trait and wraps it with the `etdl_supplement!`
 macro, which generates the six-export wire ABI (`etdl_alloc`/
 `etdl_dealloc`/`etdl_supplement_id`/`etdl_supplement_version`/
@@ -196,7 +238,7 @@ etdl_supplement_sdk::etdl_supplement!(MyAudit);
 
 ```bash
 cargo build --target wasm32-unknown-unknown --release
-etdl supplement install target/wasm32-unknown-unknown/release/my_audit.wasm
+etdl install target/wasm32-unknown-unknown/release/my_audit.wasm
 ```
 
 The plugin sees the parsed document as `serde_json::Value`, not

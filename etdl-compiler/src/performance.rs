@@ -3,11 +3,15 @@
 //!
 //! Reads a document's `x-performance` extension field (the same generic
 //! `x-*` mechanism every extension already uses — zero parser/AST changes
-//! were needed), deserializes it into [`Budget`] values, and validates
-//! them. Purely declarative: per spec Section 6, a Budget's percentile
-//! targets are never enforced at runtime and never translated into a
-//! fault-tree probability override — `process()` uses the trait's default
-//! (empty) `basic_event_overrides()`.
+//! were needed), deserializes it into [`Budget`]/[`BarrierCheck`] values,
+//! and validates them. A Budget never resolves into a fault-tree
+//! probability override — `process()` uses the trait's default (empty)
+//! `basic_event_overrides()` — but, unlike earlier revisions of this
+//! supplement, a Budget's concurrency/rate/latency requirements ARE
+//! enforced and observed at runtime: `codegen/rust.rs` emits calls into
+//! `etdl_core::perf` wherever a Budget applies, and a `BarrierCheck` links
+//! a core Barrier node to the ECEL path `performance.in_budget`. See
+//! `docs/reference/performance-supplement.md`.
 //!
 //! Unlike the Tree Event and Reliability supplements, this extension is
 //! **not** special-cased with a direct function call anywhere in
@@ -34,7 +38,7 @@ pub const PERFORMANCE_SCHEMA: &str = "etdl.performance/1.0";
 /// One Budget Object under `x-performance.budgets`
 /// (`ETDL-Performance-Supplement.md` Section 4.1). Structure is via serde;
 /// range/ordering/reference rules are hand-checked in
-/// [`parse_and_validate_budgets`], the same "structure via serde, rules via
+/// [`parse_and_validate_performance`], the same "structure via serde, rules via
 /// explicit checks" split every other supplement in this compiler uses (no
 /// JSON-Schema-validation engine is used anywhere in this codebase).
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -57,36 +61,63 @@ pub struct Budget {
     pub expected_rate_per_second: Option<f64>,
 }
 
-/// Read every Budget Object declared under `x-performance.budgets` in the
-/// document. Returns `(budgets, diagnostics)`: a budget that failed any
-/// check is omitted from `budgets` but always produces a diagnostic (except
-/// `W-413`, whose budget is still returned — a duplicate `nodeRef` is a
-/// warning, not a rejection).
-pub fn parse_and_validate_budgets(doc: &EtlDocument) -> (Vec<Budget>, Vec<Diagnostic>) {
+/// One Barrier Check Object under `x-performance.barrierChecks`
+/// (`ETDL-Performance-Supplement.md` Section 4.2). Links a core Barrier
+/// node to the Budget it validates via the ECEL path
+/// `performance.in_budget` — declared entirely within this extension
+/// field, the same pattern `safety::SafetyBarrier` already uses
+/// (`x-safety.barriers`' own `nodeRef` naming a core Barrier node) rather
+/// than adding a new field to core's `Branch`/`Barrier` grammar.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct BarrierCheck {
+    pub id: String,
+    #[serde(rename = "nodeRef")]
+    pub node_ref: String,
+    #[serde(rename = "budgetRef")]
+    pub budget_ref: String,
+}
+
+/// Every Budget/Barrier Check that parsed and validated successfully.
+#[derive(Debug, Clone, Default)]
+pub struct PerformanceData {
+    pub budgets: Vec<Budget>,
+    pub barrier_checks: Vec<BarrierCheck>,
+}
+
+/// Read every Budget Object and Barrier Check Object declared under
+/// `x-performance` in the document. A budget or barrier check that failed
+/// any check is omitted from the returned [`PerformanceData`] but always
+/// produces a diagnostic (except `W-413`/`W-415`, whose entry is still
+/// returned — a duplicate `nodeRef` is a warning, not a rejection).
+pub fn parse_and_validate_performance(doc: &EtlDocument) -> (PerformanceData, Vec<Diagnostic>) {
     let mut diagnostics = Vec::new();
-    let mut budgets = Vec::new();
+    let mut data = PerformanceData::default();
 
     // `x-performance` is only processed when the document explicitly opts
     // in via `supplements:`, never merely because the extension field
     // happens to be present — the same gate every other supplement uses.
     if !crate::validate::declares_supplement(doc, PERFORMANCE_SUPPLEMENT) {
-        return (budgets, diagnostics);
+        return (data, diagnostics);
     }
 
     let Some(ext) = doc.extensions.get("x-performance") else {
-        return (budgets, diagnostics);
+        return (data, diagnostics);
     };
 
     // Unlike Tree Event's `trees`, `budgets` is OPTIONAL at the top level
     // (no `"required"` array in the JSON Schema) — a missing key is not an
-    // error.
-    let Some(raw_budgets) = ext.get("budgets") else {
-        return (budgets, diagnostics);
-    };
+    // error. `barrierChecks` is parsed independently, further below, since
+    // its absence is equally not an error — kept in a local `Vec<Budget>`
+    // throughout (rather than `data.budgets`) purely so
+    // `parse_and_validate_barrier_checks` can borrow the finished list
+    // without also needing a mutable borrow of `data` at the same time.
+    let mut budgets: Vec<Budget> = Vec::new();
 
-    let candidates: Vec<Budget> = match serde_yaml::from_value(raw_budgets.clone()) {
-        Ok(b) => b,
-        Err(e) => {
+    let raw_budgets = ext.get("budgets");
+    let candidates: Vec<Budget> = match raw_budgets.map(|v| serde_yaml::from_value(v.clone())) {
+        None => Vec::new(),
+        Some(Ok(b)) => b,
+        Some(Err(e)) => {
             // The spec's diagnostic table (Section 5) has no dedicated
             // "manifest invalid" code (unlike Tree Event's E-120) — E-160 is
             // already a multi-condition catch-all for this object, so a
@@ -95,7 +126,7 @@ pub fn parse_and_validate_budgets(doc: &EtlDocument) -> (Vec<Budget>, Vec<Diagno
                 "E-160",
                 format!("x-performance: invalid budget manifest: {e}"),
             ));
-            return (budgets, diagnostics);
+            Vec::new()
         }
     };
 
@@ -204,7 +235,118 @@ pub fn parse_and_validate_budgets(doc: &EtlDocument) -> (Vec<Budget>, Vec<Diagno
         }
     }
 
-    (budgets, diagnostics)
+    let budget_ids: BTreeSet<&str> = budgets.iter().map(|b| b.id.as_str()).collect();
+    let barrier_checks = parse_and_validate_barrier_checks(doc, ext, &budget_ids, &mut diagnostics);
+
+    data.budgets = budgets;
+    data.barrier_checks = barrier_checks;
+    (data, diagnostics)
+}
+
+/// Read every Barrier Check Object declared under `x-performance.barrierChecks`
+/// — optional at the top level, same as `budgets`. `budget_ids` is the set
+/// of budget ids that already parsed and validated successfully (a
+/// `budgetRef` naming a budget that itself failed validation is treated
+/// the same as an unresolvable one, per `ETDL-Performance-Supplement.md`
+/// Section 4.2 — `budgetRef` must resolve to a *declared, valid* Budget).
+fn parse_and_validate_barrier_checks(
+    doc: &EtlDocument,
+    ext: &serde_yaml::Value,
+    budget_ids: &BTreeSet<&str>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Vec<BarrierCheck> {
+    let mut barrier_checks = Vec::new();
+
+    let Some(raw) = ext.get("barrierChecks") else {
+        return barrier_checks;
+    };
+
+    let candidates: Vec<BarrierCheck> = match serde_yaml::from_value(raw.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            diagnostics.push(Diagnostic::error(
+                "E-162",
+                format!("x-performance: invalid barrierChecks manifest: {e}"),
+            ));
+            return barrier_checks;
+        }
+    };
+
+    let mut seen_ids = BTreeSet::new();
+    let mut seen_node_refs = BTreeSet::new();
+
+    for check in candidates {
+        let mut has_error = false;
+
+        if !seen_ids.insert(check.id.clone()) {
+            diagnostics.push(Diagnostic::error(
+                "E-162",
+                format!("x-performance: duplicate barrierChecks id '{}'", check.id),
+            ));
+            has_error = true;
+        }
+
+        if !resolve_barrier_node_ref(doc, &check.node_ref) {
+            diagnostics.push(Diagnostic::error(
+                "E-162",
+                format!(
+                    "x-performance: barrierChecks '{}': nodeRef '{}' does not resolve to a Barrier node",
+                    check.id, check.node_ref
+                ),
+            ));
+            has_error = true;
+        }
+
+        if !budget_ids.contains(check.budget_ref.as_str()) {
+            diagnostics.push(Diagnostic::error(
+                "E-162",
+                format!(
+                    "x-performance: barrierChecks '{}': budgetRef '{}' does not resolve to a declared budget",
+                    check.id, check.budget_ref
+                ),
+            ));
+            has_error = true;
+        }
+
+        // Not an error: the second barrierChecks entry naming a given
+        // Barrier `nodeRef` is still valid and still included — only
+        // flagged as not meaningfully authoritative for that barrier.
+        if !seen_node_refs.insert(check.node_ref.clone()) {
+            diagnostics.push(Diagnostic::warning(
+                "W-415",
+                format!(
+                    "x-performance: nodeRef '{}' is declared by more than one barrierChecks entry; only one is meaningfully authoritative",
+                    check.node_ref
+                ),
+            ));
+        }
+
+        if !has_error {
+            barrier_checks.push(check);
+        }
+    }
+
+    barrier_checks
+}
+
+/// Resolve a Barrier Check's `nodeRef` against the document's own
+/// `eventTrees` — node-level shape only (`^#/eventTrees/[^/]+/nodes/[^/]+$`,
+/// no whole-tree alternative, per the JSON Schema), and the named node
+/// must specifically be a Barrier — the same manual-parse, shape-then-kind
+/// style `resolve_node_ref` and `safety::resolve_node_of_kind` both use.
+fn resolve_barrier_node_ref(doc: &EtlDocument, node_ref: &str) -> bool {
+    let rest = node_ref.trim_start_matches('#');
+    let Some(after) = rest.strip_prefix("/eventTrees/") else {
+        return false;
+    };
+    match after.split('/').collect::<Vec<_>>().as_slice() {
+        [tree_id, "nodes", node_id] if !tree_id.is_empty() && !node_id.is_empty() => doc
+            .event_trees
+            .get(*tree_id)
+            .and_then(|t| t.nodes.get(*node_id))
+            .is_some_and(|n| matches!(n, Node::Barrier(_))),
+        _ => false,
+    }
 }
 
 /// Resolve a Budget's `nodeRef` against the document's own `eventTrees`,
@@ -244,12 +386,13 @@ impl PerformanceExtension {
 }
 
 /// The typed result of the performance extension's processing step: every
-/// budget that parsed and validated successfully. Uses
+/// budget and barrier check that parsed and validated successfully. Uses
 /// [`crate::extension::ExtensionResult`]'s default (empty)
 /// `basic_event_overrides()` — a Budget never resolves into a fault-tree
-/// probability (spec Section 6).
+/// probability.
 pub struct PerformanceResult {
     pub budgets: Vec<Budget>,
+    pub barrier_checks: Vec<BarrierCheck>,
 }
 
 impl crate::extension::ExtensionResult for PerformanceResult {
@@ -269,11 +412,12 @@ impl crate::extension::EtdlExtension for PerformanceExtension {
 
     fn descriptor(&self) -> crate::extension::SupplementDescriptor {
         crate::extension::SupplementDescriptor {
-            summary: "Declared latency-percentile budgets (p50Ms/p95Ms/p99Ms) and an optional \
-                      throughput expectation for an Operation or a whole Event Tree; declarative \
-                      only, never enforced at runtime.",
+            summary: "Declared latency/concurrency/throughput requirements (p50Ms/p95Ms/p99Ms, \
+                      maxConcurrency, expectedRatePerSecond) for an Operation or a whole Event \
+                      Tree, structurally enforced by generated code and validated live by a \
+                      linked Barrier via performance.in_budget (barrierChecks).",
             schema: Some(PERFORMANCE_SCHEMA),
-            diagnostic_codes: &["E-160", "E-161", "W-413"],
+            diagnostic_codes: &["E-160", "E-161", "E-162", "E-163", "W-413", "W-415"],
             requires: &[],
         }
     }
@@ -284,26 +428,29 @@ impl crate::extension::EtdlExtension for PerformanceExtension {
         _context: &crate::extension::ExtensionContext<'_>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let (_budgets, budget_diagnostics) = parse_and_validate_budgets(doc);
-        diagnostics.extend(budget_diagnostics);
+        let (_data, perf_diagnostics) = parse_and_validate_performance(doc);
+        diagnostics.extend(perf_diagnostics);
     }
 
     /// Deliberately does **not** extend `diagnostics` again: `run_extensions`
     /// only skips `process()` after an *error* from `validate()` (warnings
     /// don't block it — see `Compiler::run_extensions`), so a `process()`
     /// that re-ran the same diagnostic-producing checks would duplicate
-    /// every warning (e.g. W-413) every time this extension actually runs
-    /// through the real pipeline. `validate()` already reported everything
-    /// there is to report; this just recomputes the same deterministic
-    /// `budgets` list for [`PerformanceResult`].
+    /// every warning (e.g. W-413/W-415) every time this extension actually
+    /// runs through the real pipeline. `validate()` already reported
+    /// everything there is to report; this just recomputes the same
+    /// deterministic [`PerformanceData`] for [`PerformanceResult`].
     fn process(
         &self,
         doc: &EtlDocument,
         _context: &crate::extension::ExtensionContext<'_>,
         _diagnostics: &mut Vec<Diagnostic>,
     ) -> Box<dyn crate::extension::ExtensionResult + '_> {
-        let (budgets, _budget_diagnostics) = parse_and_validate_budgets(doc);
-        Box::new(PerformanceResult { budgets })
+        let (data, _perf_diagnostics) = parse_and_validate_performance(doc);
+        Box::new(PerformanceResult {
+            budgets: data.budgets,
+            barrier_checks: data.barrier_checks,
+        })
     }
 }
 
@@ -366,7 +513,8 @@ eventTrees:
       C: { type: consequence, operation: terminate }
 "#;
         let doc: EtlDocument = serde_yaml::from_str(yaml).unwrap();
-        let (budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        let budgets = data.budgets;
         assert!(budgets.is_empty());
         assert!(diagnostics.is_empty());
     }
@@ -382,7 +530,8 @@ eventTrees:
       p99Ms: 2000
 "##,
         );
-        let (budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        let budgets = data.budgets;
         assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
         assert_eq!(budgets.len(), 1);
     }
@@ -400,7 +549,8 @@ eventTrees:
       expectedRatePerSecond: 50
 "##,
         );
-        let (budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        let budgets = data.budgets;
         assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
         assert_eq!(budgets.len(), 1);
     }
@@ -408,7 +558,8 @@ eventTrees:
     #[test]
     fn missing_budgets_key_is_not_an_error() {
         let doc = doc_with_budgets("  {}");
-        let (budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        let budgets = data.budgets;
         assert!(budgets.is_empty());
         assert!(diagnostics.is_empty());
     }
@@ -416,7 +567,8 @@ eventTrees:
     #[test]
     fn malformed_budgets_produces_e160() {
         let doc = doc_with_budgets("  budgets: \"oops\"");
-        let (budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        let budgets = data.budgets;
         assert!(budgets.is_empty());
         assert!(diagnostics.iter().any(|d| d.code == "E-160"));
     }
@@ -432,7 +584,7 @@ eventTrees:
       p99Ms: 2000
 "##,
         );
-        let (_budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (_data, diagnostics) = parse_and_validate_performance(&doc);
         assert!(diagnostics.iter().any(|d| d.code == "E-161"));
         assert!(!diagnostics.iter().any(|d| d.code == "E-160"));
     }
@@ -453,7 +605,8 @@ eventTrees:
       p99Ms: 300
 "##,
         );
-        let (budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        let budgets = data.budgets;
         assert_eq!(budgets.len(), 2);
         assert!(diagnostics.iter().any(|d| d.code == "W-413"));
         assert!(!diagnostics.iter().any(|d| d.is_error()));
@@ -470,7 +623,8 @@ eventTrees:
       p99Ms: 300
 "##,
         );
-        let (budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        let budgets = data.budgets;
         assert!(budgets.is_empty());
         assert!(diagnostics.iter().any(|d| d.code == "E-160"));
     }
@@ -486,7 +640,8 @@ eventTrees:
       p99Ms: 300
 "##,
         );
-        let (budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        let budgets = data.budgets;
         assert!(budgets.is_empty());
         assert!(diagnostics.iter().any(|d| d.code == "E-160"));
     }
@@ -502,7 +657,8 @@ eventTrees:
       p99Ms: 300
 "##,
         );
-        let (budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        let budgets = data.budgets;
         assert!(budgets.is_empty());
         assert!(diagnostics.iter().any(|d| d.code == "E-160"));
         assert!(!diagnostics.iter().any(|d| d.code == "E-161"));
@@ -524,7 +680,7 @@ eventTrees:
       p99Ms: 300
 "##,
         );
-        let (_budgets, diagnostics) = parse_and_validate_budgets(&doc);
+        let (_data, diagnostics) = parse_and_validate_performance(&doc);
         assert!(diagnostics.iter().any(|d| d.code == "E-160" && d.message.contains("duplicate budget id")));
     }
 
@@ -547,5 +703,182 @@ eventTrees:
         assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
         assert_eq!(result.extension_id(), PERFORMANCE_SUPPLEMENT);
         assert!(result.basic_event_overrides().is_empty());
+    }
+
+    #[test]
+    fn missing_barrier_checks_key_is_not_an_error() {
+        let doc = doc_with_budgets(
+            r##"  budgets:
+    - id: op-budget
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      p50Ms: 150
+      p95Ms: 800
+      p99Ms: 2000
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+        assert!(data.barrier_checks.is_empty());
+    }
+
+    #[test]
+    fn valid_barrier_check_has_no_diagnostics() {
+        let doc = doc_with_budgets(
+            r##"  budgets:
+    - id: op-budget
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      p50Ms: 150
+      p95Ms: 800
+      p99Ms: 2000
+  barrierChecks:
+    - id: perf-guard
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      budgetRef: op-budget
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+        assert_eq!(data.barrier_checks.len(), 1);
+    }
+
+    #[test]
+    fn malformed_barrier_checks_produces_e162() {
+        let doc = doc_with_budgets("  budgets: []\n  barrierChecks: \"oops\"");
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        assert!(data.barrier_checks.is_empty());
+        assert!(diagnostics.iter().any(|d| d.code == "E-162"));
+    }
+
+    #[test]
+    fn barrier_check_node_ref_at_operation_is_rejected_produces_e162() {
+        let doc = doc_with_budgets(
+            r##"  budgets:
+    - id: op-budget
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      p50Ms: 150
+      p95Ms: 800
+      p99Ms: 2000
+  barrierChecks:
+    - id: bad-guard
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      budgetRef: op-budget
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        assert!(data.barrier_checks.is_empty());
+        assert!(diagnostics.iter().any(|d| d.code == "E-162"));
+    }
+
+    #[test]
+    fn barrier_check_unresolvable_node_ref_produces_e162() {
+        let doc = doc_with_budgets(
+            r##"  budgets:
+    - id: op-budget
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      p50Ms: 150
+      p95Ms: 800
+      p99Ms: 2000
+  barrierChecks:
+    - id: bad-guard
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/DoesNotExist"
+      budgetRef: op-budget
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        assert!(data.barrier_checks.is_empty());
+        assert!(diagnostics.iter().any(|d| d.code == "E-162"));
+    }
+
+    #[test]
+    fn barrier_check_unresolvable_budget_ref_produces_e162() {
+        let doc = doc_with_budgets(
+            r##"  budgets:
+    - id: op-budget
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      p50Ms: 150
+      p95Ms: 800
+      p99Ms: 2000
+  barrierChecks:
+    - id: bad-guard
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      budgetRef: no-such-budget
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        assert!(data.barrier_checks.is_empty());
+        assert!(diagnostics.iter().any(|d| d.code == "E-162"));
+    }
+
+    #[test]
+    fn budget_ref_naming_an_invalid_budget_is_also_e162() {
+        // The named budget itself fails validation (bad percentile
+        // ordering) and is therefore never in the accepted `budgets` list
+        // — `budgetRef` pointing at it is treated the same as pointing at
+        // nothing at all.
+        let doc = doc_with_budgets(
+            r##"  budgets:
+    - id: broken-budget
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      p50Ms: 900
+      p95Ms: 800
+      p99Ms: 2000
+  barrierChecks:
+    - id: guard
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      budgetRef: broken-budget
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        assert!(data.barrier_checks.is_empty());
+        assert!(diagnostics.iter().any(|d| d.code == "E-162"));
+        assert!(diagnostics.iter().any(|d| d.code == "E-161"));
+    }
+
+    #[test]
+    fn duplicate_barrier_check_id_produces_e162() {
+        let doc = doc_with_budgets(
+            r##"  budgets:
+    - id: op-budget
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      p50Ms: 150
+      p95Ms: 800
+      p99Ms: 2000
+  barrierChecks:
+    - id: dup
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      budgetRef: op-budget
+    - id: dup
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      budgetRef: op-budget
+"##,
+        );
+        let (_data, diagnostics) = parse_and_validate_performance(&doc);
+        assert!(diagnostics
+            .iter()
+            .any(|d| d.code == "E-162" && d.message.contains("duplicate barrierChecks id")));
+    }
+
+    #[test]
+    fn duplicate_barrier_check_node_ref_produces_w415_and_keeps_both() {
+        let doc = doc_with_budgets(
+            r##"  budgets:
+    - id: op-budget
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/ProcessPaymentOperation"
+      p50Ms: 150
+      p95Ms: 800
+      p99Ms: 2000
+  barrierChecks:
+    - id: first
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      budgetRef: op-budget
+    - id: second
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      budgetRef: op-budget
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_performance(&doc);
+        assert_eq!(data.barrier_checks.len(), 2);
+        assert!(diagnostics.iter().any(|d| d.code == "W-415"));
+        assert!(!diagnostics.iter().any(|d| d.is_error()));
     }
 }

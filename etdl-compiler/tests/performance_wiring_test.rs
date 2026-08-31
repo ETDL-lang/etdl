@@ -1,6 +1,6 @@
 //! Proves the Performance Supplement's diagnostics actually surface
 //! through the real public `Compiler::validate`/`compile` entry points, not
-//! just through `performance::parse_and_validate_budgets` called directly
+//! just through `performance::parse_and_validate_performance` called directly
 //! (which `etdl-compiler/src/performance.rs`'s own unit tests already
 //! cover). Unlike the Tree Event Supplement — which has no equivalent
 //! wiring-level test today — Performance is registered generically via
@@ -46,7 +46,7 @@ x-performance:
 // `run_extensions`'s "skip process() after an error" guard does not apply —
 // both `validate()` and `process()` run for real. This is exactly the case
 // that previously produced two identical W-413s (process() re-ran
-// `parse_and_validate_budgets` and re-pushed the same diagnostics
+// `parse_and_validate_performance` and re-pushed the same diagnostics
 // `validate()` had already reported); an E-160/E-161 (error) case would not
 // have caught that bug, since process() is skipped entirely once an error
 // is present.
@@ -168,7 +168,9 @@ fn document_not_declaring_performance_is_unaffected() {
     let diagnostics = Compiler::new().validate(&doc, &registry);
 
     assert!(
-        !diagnostics.iter().any(|d| d.code.starts_with("E-16") || d.code == "W-413"),
+        !diagnostics
+            .iter()
+            .any(|d| d.code.starts_with("E-16") || d.code == "W-413" || d.code == "W-415"),
         "expected zero performance-related diagnostics, got {:?}",
         diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
     );

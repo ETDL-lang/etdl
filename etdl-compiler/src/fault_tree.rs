@@ -125,7 +125,11 @@ fn compute_top_event_probability(
         .ok_or_else(|| format!("topEvent.rootCause '{}' probability not resolved", root_id))
 }
 
-fn compute_basic_event_probability(be: &etdl_parser::ast::BasicEvent) -> Result<f64, String> {
+/// `pub(crate)`, not private: `codegen/rust.rs`'s live-reliability
+/// registration codegen reuses this exact formula to seed each local
+/// basic event's live estimator — the same declared-probability
+/// computation, not a second copy that could drift.
+pub(crate) fn compute_basic_event_probability(be: &etdl_parser::ast::BasicEvent) -> Result<f64, String> {
     if let Some(ref failure_rate) = be.failure_rate {
         let mission_time = be
             .mission_time
@@ -141,156 +145,41 @@ fn compute_basic_event_probability(be: &etdl_parser::ast::BasicEvent) -> Result<
     }
 }
 
+/// Dispatches each `GateType` to its combinator in `etdl-probability-core`
+/// — the single shared implementation of "how a gate combines
+/// probabilities" (also used by the runtime live-recombination engine).
+/// This function owns only the `GateType` → function mapping and the
+/// `f64` <-> `Probability` boundary conversion; the math itself lives in
+/// `etdl_probability_core::gate`.
 fn compute_gate_probability(
     gate_type: &GateType,
     inputs: &[f64],
     k: Option<u32>,
 ) -> Result<f64, String> {
-    match gate_type {
-        GateType::And => Ok(inputs.iter().product()),
+    use etdl_probability_core::{gate, Probability};
+
+    let probs: Vec<Probability> = inputs
+        .iter()
+        .map(|&p| Probability::new(p).map_err(|e| e.to_string()))
+        .collect::<Result<_, _>>()?;
+
+    let result = match gate_type {
+        GateType::And => {
+            etdl_probability_core::independent_and_n(&probs).map_err(|e| e.to_string())?
+        }
         GateType::Or => {
-            let complement: f64 = inputs.iter().map(|p| 1.0 - p).product();
-            Ok(1.0 - complement)
+            etdl_probability_core::independent_or_n(&probs).map_err(|e| e.to_string())?
         }
-        GateType::Not => {
-            if inputs.len() != 1 {
-                return Err("NOT gate requires exactly 1 input".to_string());
-            }
-            if inputs[0] < 0.0 || inputs[0] > 1.0 {
-                return Err(format!(
-                    "NOT gate input probability {} out of range",
-                    inputs[0]
-                ));
-            }
-            Ok(1.0 - inputs[0])
-        }
-        GateType::Xor => {
-            if inputs.len() != 2 {
-                return Err("XOR gate requires exactly 2 inputs".to_string());
-            }
-            Ok(inputs[0] + inputs[1] - 2.0 * inputs[0] * inputs[1])
-        }
+        GateType::Not => gate::not(&probs).map_err(|e| e.to_string())?,
+        GateType::Xor => gate::xor(&probs).map_err(|e| e.to_string())?,
         GateType::Voting => {
             let k_val = k.ok_or("VOTING gate requires k")? as usize;
-            let n = inputs.len();
-
-            if k_val < 1 || k_val > n {
-                return Err(format!("VOTING gate: k={} out of range [1, {}]", k_val, n));
-            }
-
-            if inputs.iter().all(|&p| (p - inputs[0]).abs() < 1e-10) {
-                let p = inputs[0].clamp(0.0, 1.0);
-                let mut total = 0.0;
-                for j in k_val..=n {
-                    total +=
-                        binomial_coeff(n, j) * p.powi(j as i32) * (1.0 - p).powi((n - j) as i32);
-                }
-                Ok(total.clamp(0.0, 1.0))
-            } else {
-                let mut poly = vec![1.0];
-                for &p in inputs {
-                    poly = multiply_polynomial(&poly, &[1.0 - p, p]);
-                }
-                let mut total = 0.0;
-                for j in k_val..=n {
-                    if j < poly.len() {
-                        total += poly[j];
-                    }
-                }
-                Ok(total.clamp(0.0, 1.0))
-            }
+            gate::k_of_n(&probs, k_val).map_err(|e| e.to_string())?
         }
-        GateType::Inhibit => {
-            if inputs.len() != 2 {
-                return Err("INHIBIT gate requires exactly 2 inputs".to_string());
-            }
-            Ok(inputs[0] * inputs[1])
-        }
-        GateType::PriorityAnd => {
-            let n = inputs.len();
-            if n < 2 {
-                return Err("PRIORITY_AND gate requires at least 2 inputs".to_string());
-            }
-            // All n inputs must occur in the listed order. Assuming each
-            // ordering is equally likely: P = (prod p_i) / n!.
-            // Computed in log space to avoid factorial overflow for large n.
-            let mut log_p = 0.0;
-            for p in inputs {
-                let p = (*p).clamp(0.0, 1.0);
-                if p <= 0.0 {
-                    return Ok(0.0);
-                }
-                log_p += p.ln();
-            }
-            log_p -= ln_factorial(n);
-            Ok(log_p.exp().clamp(0.0, 1.0))
-        }
-    }
-}
-
-/// ln(n!) computed without overflow: direct f64 product for n ≤ 170 (where
-/// n! still fits in f64), and the log-gamma approximation beyond (where the
-/// exact value is astronomically small and precision is irrelevant).
-fn ln_factorial(n: usize) -> f64 {
-    if n <= 170 {
-        let mut f = 1.0f64;
-        for i in 2..=n {
-            f *= i as f64;
-        }
-        f.ln()
-    } else {
-        ln_gamma((n as f64) + 1.0)
-    }
-}
-
-/// Natural logarithm of the gamma function (Lanczos approximation), giving
-/// ln(n!) for integer n+1. Used only for n > 170 where direct products would
-/// overflow; ~1e-12 relative accuracy is ample at those magnitudes.
-fn ln_gamma(x: f64) -> f64 {
-    const G: f64 = 7.0;
-    const P: [f64; 9] = [
-        0.999_999_999_999_809_9,
-        676.5203681218851,
-        -1259.1392167224028,
-        771.323_428_777_653_1,
-        -176.615_029_162_140_6,
-        12.507343278686905,
-        -0.13857109526572012,
-        9.984_369_578_019_572e-6,
-        1.5056327351493116e-7,
-    ];
-
-    if x < 0.5 {
-        return std::f64::consts::PI.ln()
-            - (std::f64::consts::PI * x).sin().ln()
-            - ln_gamma(1.0 - x);
-    }
-    let x_minus_one = x - 1.0;
-    let mut a = P[0];
-    let t = x_minus_one + G + 0.5;
-    for i in 1..9 {
-        a += P[i] / (x_minus_one + i as f64);
-    }
-    0.5 * (2.0 * std::f64::consts::PI).ln() + (x_minus_one + 0.5) * t.ln() - t + a.ln()
-}
-
-fn binomial_coeff(n: usize, k: usize) -> f64 {
-    if k > n {
-        return 0.0;
-    }
-    // ln(C(n,k)) = ln(n!) - ln(k!) - ln((n-k)!)
-    let ln = ln_factorial(n) - ln_factorial(k) - ln_factorial(n - k);
-    ln.exp().round()
-}
-
-fn multiply_polynomial(a: &[f64], b: &[f64]) -> Vec<f64> {
-    let mut result = vec![0.0; a.len() + b.len() - 1];
-    for (i, &coeff_a) in a.iter().enumerate() {
-        for (j, &coeff_b) in b.iter().enumerate() {
-            result[i + j] += coeff_a * coeff_b;
-        }
-    }
-    result
+        GateType::Inhibit => gate::inhibit(&probs).map_err(|e| e.to_string())?,
+        GateType::PriorityAnd => gate::priority_and(&probs).map_err(|e| e.to_string())?,
+    };
+    Ok(result.value())
 }
 
 fn topological_sort_gates(
@@ -533,19 +422,6 @@ mod tests {
     }
 
     #[test]
-    fn binomial_coeff_does_not_overflow() {
-        // C(70, 35) overflows usize; the f64 implementation must still work.
-        let c = binomial_coeff(70, 35);
-        assert!(c > 0.0);
-        // Exact value is 112186277816656760000 ≈ 1.121862778e20.
-        assert!(
-            (c - 1.121862778e20).abs() / 1.121862778e20 < 1e-6,
-            "got {}",
-            c
-        );
-    }
-
-    #[test]
     fn priority_and_large_n_no_overflow() {
         // n inputs of probability 1.0 give P = 1/n!; this must not overflow
         // the u64 path (20! fits, 21! does not).
@@ -562,15 +438,6 @@ mod tests {
         // Sanity: the results are tiny but positive numbers.
         assert!(p20 > 0.0 && p20 < 1e-15);
         assert!(p21 > 0.0 && p21 < 1e-15);
-    }
-
-    #[test]
-    fn ln_gamma_consistency() {
-        // ln(6!) = ln(720) ≈ 6.5792
-        assert!((ln_factorial(6) - 720.0f64.ln()).abs() < 1e-9);
-        // Large n: compare log-space binomial against direct small-n result.
-        let small = binomial_coeff(10, 5);
-        assert!((small - 252.0).abs() < 1e-6);
     }
 
     #[test]

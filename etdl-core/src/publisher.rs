@@ -7,7 +7,8 @@
 //! transport at the boundary.
 //!
 //! The reference implementation ships [`NoopPublisher`] (discards with a log) and
-//! [`ChannelCapturingPublisher`] (records `(channel, payload)` pairs for tests).
+//! [`ChannelCapturingPublisher`] (records `(channel, payload, headers)` triples
+//! for tests).
 //! Applications implement [`Publisher`] for their own infrastructure and, per
 //! ETDL §9.2, SHOULD inject the W3C `traceparent` (see
 //! [`crate::telemetry::inject_traceparent`]) into every outbound message.
@@ -40,6 +41,28 @@ impl From<String> for PublishError {
 pub trait Publisher: Send + Sync {
     /// Publish `payload` to `channel`.
     fn publish(&self, channel: &str, payload: &serde_json::Value) -> Result<(), PublishError>;
+
+    /// Publish `payload` to `channel` with additional `headers` attached —
+    /// used by generated code when a document declares
+    /// `etdl.live-reliability` (see `etdl-core::live` and
+    /// `docs/reference/live-reliability.md`) to carry a fault tree's
+    /// current values to the next service. **Additive**: the default
+    /// implementation ignores `headers` and delegates to [`Publisher::publish`],
+    /// so every existing implementor (this crate's own, and any
+    /// application's) keeps compiling and behaving identically without
+    /// changes. An implementor that doesn't override this silently drops
+    /// the carried values — the receiving service's affected node just
+    /// falls back to its own prior/cold-start estimate, never a hard
+    /// failure, matching this whole feature's best-effort character.
+    fn publish_with_headers(
+        &self,
+        channel: &str,
+        payload: &serde_json::Value,
+        headers: &serde_json::Value,
+    ) -> Result<(), PublishError> {
+        let _ = headers;
+        self.publish(channel, payload)
+    }
 }
 
 /// A [`Publisher`] that logs and discards every message.
@@ -58,10 +81,20 @@ impl Publisher for NoopPublisher {
     }
 }
 
-/// A [`Publisher`] that records `(channel, payload)` pairs for assertions.
+/// A `(channel, payload, headers)` triple recorded by [`ChannelCapturingPublisher`].
+/// `headers` is `None` for a plain [`Publisher::publish`] call and `Some(...)`
+/// for a [`Publisher::publish_with_headers`] call.
+pub type CapturedPublish = (String, serde_json::Value, Option<serde_json::Value>);
+
+/// A [`Publisher`] that records `(channel, payload, headers)` triples for
+/// assertions. `headers` is `None` for plain [`Publisher::publish`] calls and
+/// `Some(...)` for [`Publisher::publish_with_headers`] calls — the latter is
+/// how a document declaring `etdl.live-reliability` attaches a fault tree's
+/// current values to an outgoing message (see [`crate::live`]), so tests
+/// exercising that supplement need a way to recover what was attached.
 #[derive(Debug, Default, Clone)]
 pub struct ChannelCapturingPublisher {
-    sent: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    sent: Arc<Mutex<Vec<CapturedPublish>>>,
 }
 
 impl ChannelCapturingPublisher {
@@ -70,8 +103,17 @@ impl ChannelCapturingPublisher {
         Self::default()
     }
 
-    /// The recorded `(channel, payload)` pairs in publish order.
+    /// The recorded `(channel, payload)` pairs in publish order (headers, if
+    /// any were attached, are dropped — see [`Self::sent_with_headers`]).
     pub fn sent(&self) -> Vec<(String, serde_json::Value)> {
+        self.sent_with_headers()
+            .into_iter()
+            .map(|(c, p, _)| (c, p))
+            .collect()
+    }
+
+    /// The recorded `(channel, payload, headers)` triples in publish order.
+    pub fn sent_with_headers(&self) -> Vec<CapturedPublish> {
         self.sent.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
@@ -79,12 +121,36 @@ impl ChannelCapturingPublisher {
     pub fn published_to(&self, channel: &str) -> bool {
         self.sent().iter().any(|(c, _)| c == channel)
     }
+
+    /// The headers attached to the most recent [`Publisher::publish_with_headers`]
+    /// call for `channel`, or `None` if no such call happened (either nothing
+    /// was published to `channel`, or it was published via plain
+    /// [`Publisher::publish`] with no headers attached).
+    pub fn headers_sent_to(&self, channel: &str) -> Option<serde_json::Value> {
+        self.sent_with_headers()
+            .into_iter()
+            .rev()
+            .find(|(c, _, _)| c == channel)
+            .and_then(|(_, _, h)| h)
+    }
 }
 
 impl Publisher for ChannelCapturingPublisher {
     fn publish(&self, channel: &str, payload: &serde_json::Value) -> Result<(), PublishError> {
         if let Ok(mut g) = self.sent.lock() {
-            g.push((channel.to_string(), payload.clone()));
+            g.push((channel.to_string(), payload.clone(), None));
+        }
+        Ok(())
+    }
+
+    fn publish_with_headers(
+        &self,
+        channel: &str,
+        payload: &serde_json::Value,
+        headers: &serde_json::Value,
+    ) -> Result<(), PublishError> {
+        if let Ok(mut g) = self.sent.lock() {
+            g.push((channel.to_string(), payload.clone(), Some(headers.clone())));
         }
         Ok(())
     }
@@ -111,5 +177,26 @@ mod tests {
         assert_eq!(sent[1].0, "b");
         assert!(p.published_to("b"));
         assert!(!p.published_to("c"));
+    }
+
+    #[test]
+    fn capturing_publisher_records_headers_separately_from_plain_publish() {
+        let p = ChannelCapturingPublisher::new();
+        p.publish("plain", &serde_json::json!(1)).unwrap();
+        p.publish_with_headers("with-headers", &serde_json::json!(2), &serde_json::json!({"k": "v"}))
+            .unwrap();
+
+        assert_eq!(p.headers_sent_to("plain"), None);
+        assert_eq!(
+            p.headers_sent_to("with-headers"),
+            Some(serde_json::json!({"k": "v"}))
+        );
+        assert_eq!(p.headers_sent_to("never-published"), None);
+
+        // `sent()` still reports both, headers-less, for callers that only
+        // care about channel/payload (unchanged behavior).
+        let sent = p.sent();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[1].0, "with-headers");
     }
 }

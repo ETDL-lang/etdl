@@ -57,3 +57,17 @@ thiserror = "2"
 etdl-parser = { path = "etdl-parser" }
 etdl-compiler = { path = "etdl-compiler" }
 etdl-reliability-core = { path = "etdl-reliability-core" }
+
+# etdl-target-java/python/go/dotnet (>= 0.0.2) depend on etdl-parser/
+# etdl-compiler as plain crates.io versions (not the git URL above), now
+# that those crates are actually published. Without this, Cargo pulls a
+# second, distinct copy of each from crates.io alongside the workspace's
+# own `path` copy — a diamond dependency where `etdl_compiler::codegen::
+# CodeGenerator` from one copy isn't the same trait as the other, so every
+# target's `impl CodeGenerator` fails to satisfy `Box<dyn CodeGenerator>`
+# built from this workspace's copy. This redirects the crates.io copies
+# back to the same `path` crates the git patch above already uses, so
+# there is exactly one copy of each in the graph either way.
+[patch.crates-io]
+etdl-parser = { path = "etdl-parser" }
+etdl-compiler = { path = "etdl-compiler" }

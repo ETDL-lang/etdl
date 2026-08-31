@@ -73,7 +73,7 @@ pub async fn handle_order_placed_trigger(message: OrderPlaced) -> Result<(), Wor
     let mut inventory_check_barrier = BranchMonitor::new("InventoryCheckBarrier");
 
     if message.payload.items.iter().all(|item| item.qty > 0) {
-        inventory_check_barrier.record_branch("SUCCESS", 0.950000);
+        inventory_check_barrier.record_branch("InventoryCheckBarrier", "SUCCESS", 0.950000);
         let retry = RetryPolicy {
             max_attempts: 3,
             backoff_ms: 250,
@@ -89,7 +89,7 @@ pub async fn handle_order_placed_trigger(message: OrderPlaced) -> Result<(), Wor
             }
         }
     } else {
-        inventory_check_barrier.record_branch("FAILURE", 0.050000);
+        inventory_check_barrier.record_branch("InventoryCheckBarrier", "FAILURE", 0.050000);
         publish_to_channel("DeadLetterChannel", message).await?;
     }
     Ok(())
@@ -120,15 +120,13 @@ etdl validate order-fulfillment.etdl
 
 ### Install from source
 
-Prefer this over `cargo install` if you want the `plugins` feature (dynamic
-`.wasm` supplements, off by default) or you're building against an unreleased
+Prefer this over `cargo install` if you're building against an unreleased
 change:
 
 ```bash
 git clone https://github.com/ETDL-lang/etdl.git
 cd etdl
-cargo build --release -p etdl-cli                    # default features: reliability, discovery, all four language targets
-cargo build --release -p etdl-cli --features plugins  # + etdl supplement install/list/remove
+cargo build --release -p etdl-cli   # default features: reliability, discovery, all four language targets
 ```
 
 The binary lands at `target/release/etdl`; put it on your `PATH` or invoke
@@ -305,13 +303,12 @@ supplements as sandboxed `.wasm` modules** — no rebuild of `etdl-cli`
 required:
 
 ```bash
-etdl supplement install <path-or-https-url>   # checks conformance, then installs
-etdl supplement list                          # built-in extensions + installed plugins
+etdl install <path-or-https-url>   # checks conformance, then installs
+etdl supplement list               # built-in extensions + installed plugins
 etdl supplement remove <id>
 ```
 
-Requires `etdl-cli` built with the `plugins` feature (off by default — see
-[Install from source](#install-from-source) below). A plugin gets no
+Always compiled into `etdl-cli` (not feature-gated). A plugin gets no
 filesystem, network, or clock access and runs under a `wasmtime` fuel
 budget; malformed or misbehaving plugins become an ordinary diagnostic,
 never a host crash. Write one in Rust with

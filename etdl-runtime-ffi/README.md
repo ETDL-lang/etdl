@@ -18,6 +18,7 @@ ETDL compiles reliability models (event trees per IEC 62502, fault trees per IEC
 | `etdl_condition_{matches,contains}` | ECEL `matches` (RE2-compatible regex) / `in` (set membership) — identical semantics in every binding, because it's the same regex engine either way |
 | `etdl_runtime_{version,abi_version}` | Diagnostics + ABI-compatibility check (`ETDL_RUNTIME_ABI_VERSION`) |
 | `etdl_last_error_message`, `etdl_string_free`, `etdl_set_log_callback` | Error reporting and a panic-safe one-way notification callback |
+| `etdl_exporter_{prometheus,loki,otlp}_install` | One-time setup for `etdl-core`'s optional observability exporters (`exporter-prometheus`/`-loki`/`-otlp` features) — see [Observability Exporters](https://github.com/ETDL-lang/etdl/blob/main/docs/reference/observability-exporters.md) |
 
 Design rules the whole surface follows: opaque handles only (no Rust memory layout crosses the boundary), every function is wrapped in `catch_unwind` (no Rust panic can ever cross into C/Java/Python/Go/.NET), and the smallest set of operations a real binding actually needs — nothing spec'd speculatively.
 

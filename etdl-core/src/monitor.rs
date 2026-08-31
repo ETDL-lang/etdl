@@ -117,36 +117,62 @@ impl BranchMonitor {
         }
     }
 
-    pub fn record_branch(&mut self, outcome: &str, declared_probability: f64) {
+    /// Records that `outcome` was taken at `node_id`, with `declared_probability`.
+    ///
+    /// `node_id` is explicit, not `self.node_id`, so a single `BranchMonitor`
+    /// reused across several barriers in one handler (as generated code
+    /// does — see `codegen/rust.rs`'s `generate_event_tree_handler`) still
+    /// attributes each barrier's SLA window, observations, and exporter
+    /// data to *that barrier's own* id, not whichever barrier the monitor
+    /// happened to be constructed with. `record_failure`/`record_success`
+    /// already had this property via their own `operation_id` parameter;
+    /// `record_branch` previously did not — see the regression test
+    /// `two_barriers_sharing_one_monitor_get_independent_sla_windows`.
+    pub fn record_branch(&mut self, node_id: &str, outcome: &str, declared_probability: f64) {
         let should_chaos = {
             let mut chaos = self.chaos.lock().unwrap();
-            chaos.should_inject_chaos(&self.node_id)
+            chaos.should_inject_chaos(node_id)
         };
         if should_chaos {
             return;
         }
 
         let mut sla = self.sla_tracker.lock().unwrap();
-        let anomaly = sla.record(&self.node_id, outcome, declared_probability, true);
+        let anomaly = sla.record(node_id, outcome, declared_probability, true);
 
         if anomaly {
             crate::telemetry::emit_anomaly_event(
-                &self.node_id,
+                node_id,
                 outcome,
                 declared_probability,
-                sla.observed_frequency(&self.node_id, outcome),
+                sla.observed_frequency(node_id, outcome),
             );
+            #[cfg(feature = "exporter-prometheus")]
+            crate::exporters::prometheus::record_anomaly(node_id, outcome);
+            #[cfg(feature = "exporter-loki")]
+            crate::exporters::loki::record_anomaly(node_id, outcome);
+            #[cfg(feature = "exporter-otlp")]
+            crate::exporters::otlp::record_anomaly(node_id, outcome);
         }
         drop(sla);
 
-        crate::telemetry::attach_node_span_attribute(&self.node_id);
+        crate::telemetry::attach_node_span_attribute(node_id);
+
+        #[cfg(feature = "exporter-prometheus")]
+        crate::exporters::prometheus::record_branch(node_id, outcome);
+        #[cfg(feature = "exporter-loki")]
+        crate::exporters::loki::record_branch(node_id, outcome, declared_probability);
+        #[cfg(feature = "exporter-otlp")]
+        crate::exporters::otlp::record_branch(node_id, outcome);
 
         // Record what happened. The declared probability is the prediction;
         // it lives in the compiled artifact/build manifest, not on every
         // observation, so it is not duplicated here (it would go stale on
         // recalibration). The runtime only records data; interpretation
         // (predicted vs observed) happens offline, in etdl-reliability.
-        self.observation_sink.emit(&self.observation(outcome));
+        let mut obs = self.observation(outcome);
+        obs.event = node_id.to_string();
+        self.observation_sink.emit(&obs);
     }
 
     pub fn record_failure(
@@ -169,11 +195,24 @@ impl BranchMonitor {
                     prob,
                     sla.observed_frequency(&key, outcome),
                 );
+                #[cfg(feature = "exporter-prometheus")]
+                crate::exporters::prometheus::record_anomaly(&key, outcome);
+                #[cfg(feature = "exporter-loki")]
+                crate::exporters::loki::record_anomaly(&key, outcome);
+                #[cfg(feature = "exporter-otlp")]
+                crate::exporters::otlp::record_anomaly(&key, outcome);
             }
         }
 
         crate::telemetry::attach_node_span_attribute(&key);
         eprintln!("[etdl] operation '{}' failed: {}", operation_id, error);
+
+        #[cfg(feature = "exporter-prometheus")]
+        crate::exporters::prometheus::record_failure(operation_id);
+        #[cfg(feature = "exporter-loki")]
+        crate::exporters::loki::record_failure(operation_id, &error.to_string());
+        #[cfg(feature = "exporter-otlp")]
+        crate::exporters::otlp::record_failure(operation_id);
 
         let mut o = self.observation("failed");
         o.event = key;
@@ -209,8 +248,21 @@ impl BranchMonitor {
                     prob,
                     sla.observed_frequency(&key, outcome),
                 );
+                #[cfg(feature = "exporter-prometheus")]
+                crate::exporters::prometheus::record_anomaly(&key, outcome);
+                #[cfg(feature = "exporter-loki")]
+                crate::exporters::loki::record_anomaly(&key, outcome);
+                #[cfg(feature = "exporter-otlp")]
+                crate::exporters::otlp::record_anomaly(&key, outcome);
             }
         }
+
+        #[cfg(feature = "exporter-prometheus")]
+        crate::exporters::prometheus::record_success(operation_id);
+        #[cfg(feature = "exporter-loki")]
+        crate::exporters::loki::record_success(operation_id);
+        #[cfg(feature = "exporter-otlp")]
+        crate::exporters::otlp::record_success(operation_id);
     }
 
     pub fn flush(&self) {
@@ -236,9 +288,41 @@ mod tests {
     #[test]
     fn test_record_branch() {
         let mut monitor = BranchMonitor::new("test_barrier");
-        monitor.record_branch("SUCCESS", 0.95);
-        monitor.record_branch("SUCCESS", 0.95);
-        monitor.record_branch("FAILURE", 0.05);
+        monitor.record_branch("test_barrier", "SUCCESS", 0.95);
+        monitor.record_branch("test_barrier", "SUCCESS", 0.95);
+        monitor.record_branch("test_barrier", "FAILURE", 0.05);
+    }
+
+    /// Regression test for generated code's shared-monitor pattern
+    /// (`generate_event_tree_handler` constructs one `BranchMonitor` per
+    /// handler call, reused across every barrier the traversal visits):
+    /// two different barriers recording through the *same* monitor
+    /// instance must land in independent SLA windows, keyed by the
+    /// explicit `node_id` each call passes — not collapse into one window
+    /// keyed by whichever id the monitor was constructed with.
+    #[test]
+    fn two_barriers_sharing_one_monitor_get_independent_sla_windows() {
+        let mut monitor = BranchMonitor::new("FirstBarrier");
+        for _ in 0..20 {
+            monitor.record_branch("FirstBarrier", "SUCCESS", 0.95);
+        }
+        for _ in 0..20 {
+            monitor.record_branch("SecondBarrier", "FAILURE", 0.95);
+        }
+
+        let sla = monitor.sla_tracker.lock().unwrap();
+        assert!(
+            (sla.observed_frequency("FirstBarrier", "SUCCESS") - 1.0).abs() < 1e-9,
+            "FirstBarrier's window must reflect only its own observations"
+        );
+        assert!(
+            (sla.observed_frequency("SecondBarrier", "FAILURE") - 1.0).abs() < 1e-9,
+            "SecondBarrier's window must reflect only its own observations"
+        );
+        // Before this fix, every call above was attributed to whichever
+        // node_id the monitor was constructed with ("FirstBarrier"),
+        // regardless of which barrier actually ran.
+        assert_eq!(sla.observed_frequency("FirstBarrier", "FAILURE"), 0.0);
     }
 
     #[derive(Debug)]

@@ -59,11 +59,21 @@ use std::sync::Mutex;
 /// bump. A language binding should call [`etdl_runtime_abi_version`] at
 /// startup and refuse to run (or warn loudly) against an unexpected major
 /// version, rather than silently misinterpreting the ABI.
-pub const ETDL_RUNTIME_ABI_VERSION: u32 = 1;
+///
+/// `2`: [`etdl_branch_monitor_record_branch`] gained a `node_id` parameter
+/// (fixes multiple barriers sharing one handle being mis-attributed to
+/// whichever id the handle was created with — see its doc comment).
+pub const ETDL_RUNTIME_ABI_VERSION: u32 = 2;
 
 pub const ETDL_OK: i32 = 0;
 pub const ETDL_ERR_NULL_HANDLE: i32 = -1;
 pub const ETDL_ERR_INVALID_ARG: i32 = -2;
+/// Returned by an `etdl_exporter_*_install` function when this library was
+/// built without the matching `exporter-*` Cargo feature. The function
+/// still exists (a stable, unconditional symbol set — no
+/// `dlsym`/`GetProcAddress` probing required by callers); it just reports
+/// that clearly instead of doing anything.
+pub const ETDL_ERR_NOT_COMPILED_IN: i32 = -3;
 pub const ETDL_ERR_PANIC: i32 = -99;
 
 /// [`etdl_retry_policy_execute`]-specific outcomes (distinct range so a
@@ -257,11 +267,15 @@ pub extern "C" fn etdl_branch_monitor_free(handle: *mut EtdlBranchMonitor) {
     });
 }
 
-/// Records that `outcome` was taken with `probability`. Returns
-/// [`ETDL_OK`] or a negative error code.
+/// Records that `outcome` was taken at `node_id`, with `probability`.
+/// `node_id` lets one handle be reused across several barriers in the same
+/// call and still attribute each one's SLA window independently — pass the
+/// specific barrier's own id, not necessarily the id `handle` was created
+/// with. Returns [`ETDL_OK`] or a negative error code.
 #[no_mangle]
 pub extern "C" fn etdl_branch_monitor_record_branch(
     handle: *mut EtdlBranchMonitor,
+    node_id: *const c_char,
     outcome: *const c_char,
     probability: f64,
 ) -> i32 {
@@ -270,10 +284,13 @@ pub extern "C" fn etdl_branch_monitor_record_branch(
             set_last_error("etdl_branch_monitor_record_branch: null handle");
             return ETDL_ERR_NULL_HANDLE;
         };
+        let Some(node_id) = cstr_to_str(node_id) else {
+            return ETDL_ERR_INVALID_ARG;
+        };
         let Some(outcome) = cstr_to_str(outcome) else {
             return ETDL_ERR_INVALID_ARG;
         };
-        monitor.inner.record_branch(outcome, probability);
+        monitor.inner.record_branch(node_id, outcome, probability);
         ETDL_OK
     })
 }
@@ -595,6 +612,146 @@ pub extern "C" fn etdl_condition_contains(
     })
 }
 
+// ---------------------------------------------------------------------
+// Observability exporters (`etdl-core`'s `exporter-prometheus`/`-loki`/
+// `-otlp` features) — process-wide install calls, so a non-Rust host app
+// can turn these on once at startup exactly like the Rust target does.
+// Every language target reaches `BranchMonitor`'s emit side automatically
+// via the existing `etdl_branch_monitor_record_*` functions above (they
+// already call straight into the same `etdl_core::BranchMonitor` methods
+// this feature instruments) — these three functions are only the
+// one-time setup step a non-Rust caller has no other way to reach. See
+// `etdl_core::exporters` and `docs/reference/observability-exporters.md`.
+// ---------------------------------------------------------------------
+
+/// Starts the compiled-in Prometheus scrape endpoint at `bind_addr` (e.g.
+/// `"127.0.0.1:9464"`, serving `/metrics`). Call once at startup, before
+/// handling any messages. Returns [`ETDL_OK`], [`ETDL_ERR_INVALID_ARG`]
+/// (null/invalid-UTF-8/unparseable address, or the exporter failed to
+/// start), or [`ETDL_ERR_NOT_COMPILED_IN`] if this library was built
+/// without the `exporter-prometheus` feature.
+#[no_mangle]
+pub extern "C" fn etdl_exporter_prometheus_install(bind_addr: *const c_char) -> i32 {
+    guard(ETDL_ERR_PANIC, || {
+        #[cfg(feature = "exporter-prometheus")]
+        {
+            let Some(bind_addr) = cstr_to_str(bind_addr) else {
+                return ETDL_ERR_INVALID_ARG;
+            };
+            let Ok(addr) = bind_addr.parse() else {
+                set_last_error(format!(
+                    "etdl_exporter_prometheus_install: invalid socket address '{bind_addr}'"
+                ));
+                return ETDL_ERR_INVALID_ARG;
+            };
+            match etdl_core::exporters::prometheus::install(addr) {
+                Ok(()) => ETDL_OK,
+                Err(e) => {
+                    set_last_error(format!("etdl_exporter_prometheus_install: {e}"));
+                    ETDL_ERR_INVALID_ARG
+                }
+            }
+        }
+        #[cfg(not(feature = "exporter-prometheus"))]
+        {
+            let _ = bind_addr;
+            set_last_error(
+                "etdl_exporter_prometheus_install: built without the exporter-prometheus feature",
+            );
+            ETDL_ERR_NOT_COMPILED_IN
+        }
+    })
+}
+
+/// Pushes observations to a Loki-compatible push API at `loki_url` (e.g.
+/// `"http://localhost:3100"`). `labels_json` is a JSON object of string
+/// labels attached to every pushed stream (e.g. `{"service":"payments"}`);
+/// `NULL` or `"{}"` means no extra labels. Call once at startup, before
+/// handling any messages — installs a fresh global `tracing` subscriber,
+/// so do not call this if the host process already has its own. Returns
+/// [`ETDL_OK`], [`ETDL_ERR_INVALID_ARG`] (null/invalid UTF-8/unparseable
+/// URL or labels, or setup failed), or [`ETDL_ERR_NOT_COMPILED_IN`] if
+/// this library was built without the `exporter-loki` feature.
+#[no_mangle]
+pub extern "C" fn etdl_exporter_loki_install(
+    loki_url: *const c_char,
+    labels_json: *const c_char,
+) -> i32 {
+    guard(ETDL_ERR_PANIC, || {
+        #[cfg(feature = "exporter-loki")]
+        {
+            let Some(loki_url) = cstr_to_str(loki_url) else {
+                return ETDL_ERR_INVALID_ARG;
+            };
+            let Ok(url) = url::Url::parse(loki_url) else {
+                set_last_error(format!("etdl_exporter_loki_install: invalid URL '{loki_url}'"));
+                return ETDL_ERR_INVALID_ARG;
+            };
+            let labels = if labels_json.is_null() {
+                std::collections::HashMap::new()
+            } else {
+                let Some(labels_json) = cstr_to_str(labels_json) else {
+                    return ETDL_ERR_INVALID_ARG;
+                };
+                match serde_json::from_str::<std::collections::HashMap<String, String>>(labels_json) {
+                    Ok(labels) => labels,
+                    Err(e) => {
+                        set_last_error(format!(
+                            "etdl_exporter_loki_install: invalid labels JSON: {e}"
+                        ));
+                        return ETDL_ERR_INVALID_ARG;
+                    }
+                }
+            };
+            match etdl_core::exporters::loki::install(url, labels) {
+                Ok(()) => ETDL_OK,
+                Err(e) => {
+                    set_last_error(format!("etdl_exporter_loki_install: {e}"));
+                    ETDL_ERR_INVALID_ARG
+                }
+            }
+        }
+        #[cfg(not(feature = "exporter-loki"))]
+        {
+            let _ = (loki_url, labels_json);
+            set_last_error("etdl_exporter_loki_install: built without the exporter-loki feature");
+            ETDL_ERR_NOT_COMPILED_IN
+        }
+    })
+}
+
+/// Pushes metrics to an OTel Collector (or any OTLP/HTTP receiver) at
+/// `endpoint` (e.g. `"http://localhost:4318"`) via the official
+/// OpenTelemetry Rust SDK, over HTTP+protobuf. Call once at startup,
+/// before handling any messages. Returns [`ETDL_OK`],
+/// [`ETDL_ERR_INVALID_ARG`] (null/invalid UTF-8, or setup failed), or
+/// [`ETDL_ERR_NOT_COMPILED_IN`] if this library was built without the
+/// `exporter-otlp` feature.
+#[no_mangle]
+pub extern "C" fn etdl_exporter_otlp_install(endpoint: *const c_char) -> i32 {
+    guard(ETDL_ERR_PANIC, || {
+        #[cfg(feature = "exporter-otlp")]
+        {
+            let Some(endpoint) = cstr_to_str(endpoint) else {
+                return ETDL_ERR_INVALID_ARG;
+            };
+            match etdl_core::exporters::otlp::install(endpoint) {
+                Ok(()) => ETDL_OK,
+                Err(e) => {
+                    set_last_error(format!("etdl_exporter_otlp_install: {e}"));
+                    ETDL_ERR_INVALID_ARG
+                }
+            }
+        }
+        #[cfg(not(feature = "exporter-otlp"))]
+        {
+            let _ = endpoint;
+            set_last_error("etdl_exporter_otlp_install: built without the exporter-otlp feature");
+            ETDL_ERR_NOT_COMPILED_IN
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,7 +777,7 @@ mod tests {
         assert!(!handle.is_null());
 
         let outcome = cstring("SUCCESS");
-        let rc = etdl_branch_monitor_record_branch(handle, outcome.as_ptr(), 0.95);
+        let rc = etdl_branch_monitor_record_branch(handle, node_id.as_ptr(), outcome.as_ptr(), 0.95);
         assert_eq!(rc, ETDL_OK);
 
         let op = cstring("checkout");
@@ -632,7 +789,8 @@ mod tests {
         assert_eq!(rc, ETDL_OK);
 
         // Null handle is a documented error, not a crash.
-        let rc = etdl_branch_monitor_record_branch(ptr::null_mut(), outcome.as_ptr(), 0.5);
+        let rc =
+            etdl_branch_monitor_record_branch(ptr::null_mut(), node_id.as_ptr(), outcome.as_ptr(), 0.5);
         assert_eq!(rc, ETDL_ERR_NULL_HANDLE);
 
         etdl_branch_monitor_free(handle);
@@ -779,5 +937,68 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    // `metrics`/`tracing` each allow installing their global
+    // recorder/subscriber exactly once per process, so each exporter gets
+    // exactly one "compiled in" test in this binary — same constraint
+    // `etdl-core`'s own exporter tests are written under.
+
+    #[cfg(feature = "exporter-prometheus")]
+    #[test]
+    fn exporter_prometheus_install_starts_a_real_listener() {
+        let addr = cstring("127.0.0.1:0");
+        let rc = etdl_exporter_prometheus_install(addr.as_ptr());
+        assert_eq!(rc, ETDL_OK);
+    }
+
+    #[cfg(not(feature = "exporter-prometheus"))]
+    #[test]
+    fn exporter_prometheus_install_reports_not_compiled_in() {
+        let addr = cstring("127.0.0.1:0");
+        let rc = etdl_exporter_prometheus_install(addr.as_ptr());
+        assert_eq!(rc, ETDL_ERR_NOT_COMPILED_IN);
+    }
+
+    #[cfg(feature = "exporter-loki")]
+    #[test]
+    fn exporter_loki_install_accepts_a_valid_url_and_labels() {
+        let url = cstring("http://127.0.0.1:1/");
+        let labels = cstring(r#"{"service":"test"}"#);
+        let rc = etdl_exporter_loki_install(url.as_ptr(), labels.as_ptr());
+        assert_eq!(rc, ETDL_OK);
+    }
+
+    #[cfg(feature = "exporter-loki")]
+    #[test]
+    fn exporter_loki_install_rejects_invalid_labels_json() {
+        let url = cstring("http://127.0.0.1:1/");
+        let bad_labels = cstring("not json");
+        let rc = etdl_exporter_loki_install(url.as_ptr(), bad_labels.as_ptr());
+        assert_eq!(rc, ETDL_ERR_INVALID_ARG);
+    }
+
+    #[cfg(not(feature = "exporter-loki"))]
+    #[test]
+    fn exporter_loki_install_reports_not_compiled_in() {
+        let url = cstring("http://127.0.0.1:1/");
+        let rc = etdl_exporter_loki_install(url.as_ptr(), ptr::null());
+        assert_eq!(rc, ETDL_ERR_NOT_COMPILED_IN);
+    }
+
+    #[cfg(feature = "exporter-otlp")]
+    #[test]
+    fn exporter_otlp_install_builds_and_installs_a_provider() {
+        let endpoint = cstring("http://127.0.0.1:1");
+        let rc = etdl_exporter_otlp_install(endpoint.as_ptr());
+        assert_eq!(rc, ETDL_OK);
+    }
+
+    #[cfg(not(feature = "exporter-otlp"))]
+    #[test]
+    fn exporter_otlp_install_reports_not_compiled_in() {
+        let endpoint = cstring("http://127.0.0.1:1");
+        let rc = etdl_exporter_otlp_install(endpoint.as_ptr());
+        assert_eq!(rc, ETDL_ERR_NOT_COMPILED_IN);
     }
 }

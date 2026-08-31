@@ -198,6 +198,7 @@ pub fn builtin_registry() -> ExtensionRegistry {
     registry.register(crate::safety::SafetyExtension::new());
     registry.register(crate::diagnostics::DiagnosticsExtension::new());
     registry.register(crate::security::SecurityExtension::new());
+    registry.register(crate::live_reliability::LiveReliabilityExtension::new());
     #[cfg(feature = "reliability")]
     {
         registry.register(crate::reliability::ReliabilityExtension::new());

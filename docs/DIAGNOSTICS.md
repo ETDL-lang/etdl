@@ -22,6 +22,10 @@ MAJOR version; new codes are added, never reused.
 | E-103 | import alias unknown, or alias has invalid characters | declare it in `asyncapi_imports` |
 | E-104 | JSON Pointer does not resolve in the AsyncAPI document | fix the pointer / schema |
 | E-105 | internal reference does not match one of the resolved shapes (`#/faultTrees/<id>/topEvent`, `#/faultTrees/<id>/gates/<gate-id>`, `#/faultTrees/<id>/basicEvents/<event-id>`, `#/components/<kind>/<id>` — including `#/components/messages/<id>` for a Message Reference), or `<id>` is unknown | fix the pointer |
+| E-106 | a `supplements:` entry's `id` is not a valid supplement identifier (must be `etdl.<domain>`) | fix the id |
+| E-107 | a `supplements:` entry's `version` is not valid SemVer, or its MAJOR is newer than this compiler supports | fix the version, or upgrade the compiler |
+| E-108 | a `supplements:` entry declares `required: true` but is not implemented by this compiler | remove `required: true`, or use a build that implements it |
+| E-109 | code generation failed for a reason validation didn't already catch (e.g. a Barrier using `reliability.in_range`/`performance.in_budget` whose link to a live-tracked fault tree/Budget doesn't resolve — see the Live Reliability/Performance Supplement docs) — should be unreachable if the document is otherwise valid; a codegen-level defensive check, not a normal document-authoring mistake | see the message for which check failed and why |
 
 ## Event-tree structure (V-1xx)
 
@@ -119,13 +123,35 @@ produced when a document declares `supplements: [{id: etdl.safety, ...}]`:
 
 `etdl.performance` (`docs/reference/performance-supplement.md`) diagnostics,
 only produced when a document declares `supplements: [{id: etdl.performance,
-...}]`:
+...}]`. Like Live Reliability below, this supplement's requirements are
+**structurally enforced and observed** by generated code, not just
+validated — see that doc's Section 6.
 
 | Code | Condition | Suggestion |
 |---|---|---|
 | E-160 | a Budget's `nodeRef` doesn't resolve to an Event Tree or Operation node; a percentile/`maxConcurrency`/`expectedRatePerSecond` value is non-positive or non-finite; `budgets` failed to deserialize; or a duplicate budget `id` was declared | fix the reference / value / id |
 | E-161 | a Budget's percentile ordering is violated (`p50Ms > p95Ms` or `p95Ms > p99Ms`) | reorder the percentiles |
+| E-162 | a `barrierChecks` entry's `nodeRef` doesn't resolve to a Barrier node, its `budgetRef` doesn't resolve to a declared Budget `id`, `barrierChecks` failed to deserialize, or a duplicate `barrierChecks` id was declared | fix the reference / id |
+| E-163 | a branch condition uses the `performance.*` path root without the document declaring `etdl.performance`, or the path isn't exactly `performance.in_budget` | declare the supplement, or fix the path |
 | W-413 | two Budgets declare the same `nodeRef` | keep one authoritative Budget per node |
+| W-415 | two `barrierChecks` entries declare the same `nodeRef` | keep one authoritative Barrier Check per barrier |
+
+## Live Reliability Supplement (E-17x / W-414)
+
+`etdl.live-reliability` (`docs/reference/live-reliability.md`) diagnostics,
+only produced when a document declares `supplements: [{id:
+etdl.live-reliability, ...}]`. Unlike every other supplement here, a
+document declaring this one gets **authoritative** runtime behavior, not
+just extra validation — see that doc for the "runtime never changes
+compiled probabilities" exception this supplement deliberately is.
+
+| Code | Condition | Suggestion |
+|---|---|---|
+| E-170 | a `faultTrees` entry's `threshold` or a basic event's `priorStrength` is non-positive/non-finite (`priorStrength`) or negative (`threshold`); a basic event's `source` isn't `local`/`inbound`; or `faultTrees` failed to deserialize | fix the value |
+| E-171 | a `faultTrees` entry's `id` doesn't resolve to a declared fault tree, or a `basicEvents` entry's `id` isn't a basic event of that fault tree | fix the reference |
+| E-172 | two `faultTrees` entries declare the same `id`, or two `basicEvents` entries (within one fault tree) declare the same `id` | rename or remove the duplicate |
+| W-414 | a `local` basic event's `priorStrength` is below 1.0 (a single observation will dominate the declared probability almost immediately) | raise `priorStrength`, or accept the fast-moving estimate |
+| E-173 | a branch condition uses the `reliability.*` path root without the document declaring `etdl.live-reliability`, or the path isn't exactly `reliability.in_range` | declare the supplement, or fix the path |
 
 ## Example quality target
 

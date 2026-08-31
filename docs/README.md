@@ -27,10 +27,12 @@ ETDL is a declarative, design-time domain-specific language (DSL) for **reliabil
 - [CLI](CLI.md) — commands, exit codes, `--json`
 - [Crates](reference/crates.md) — the workspace's crates
 - [Supplement Plugins](reference/supplement-plugins.md) — dynamically loaded, sandboxed third-party `.wasm` supplements
-- [Performance Supplement](reference/performance-supplement.md) — declared latency/throughput budgets on Operations and Event Trees
+- [Observability Exporters](reference/observability-exporters.md) — optional Prometheus/Loki/OTLP exporters for `BranchMonitor`'s runtime observations
+- [Performance Supplement](reference/performance-supplement.md) — latency/concurrency/throughput requirements on Operations and Event Trees, structurally enforced by generated code and validated live by a linked Barrier
 - [Safety Supplement](reference/safety-supplement.md) — hazard classification and Safety Integrity Level on core Barrier/Consequence nodes
 - [Diagnostics Supplement](reference/diagnostics-supplement.md) — telemetry-span-to-cause correlation metadata for post-incident triage
 - [Security Supplement](reference/security-supplement.md) — STRIDE-classified attack trees and mitigating controls on core Barrier nodes
+- [Live Reliability Supplement](reference/live-reliability.md) — opt-in, decentralized, cross-service live probability recomputation (an explicit exception to "runtime never changes compiled probabilities")
 - [API Stability](API_STABILITY.md) — public vs internal API, compatibility
 - [Diagnostics](DIAGNOSTICS.md) — every code, severity, suggestion
 - [Runtime](RUNTIME.md) — guarantees and configuration

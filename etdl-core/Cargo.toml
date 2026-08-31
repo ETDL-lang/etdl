@@ -10,13 +10,55 @@ keywords = ["etdl", "reliability", "sla-monitoring", "chaos-engineering", "event
 categories = ["development-tools", "asynchronous"]
 homepage = "https://github.com/ETDL-lang/etdl"
 
+[features]
+# Each exporter is independent — enabling one never pulls in another.
+# Off by default: a plain build stays exactly as it is without any of
+# these. See docs/reference/observability-exporters.md.
+exporter-prometheus = ["dep:metrics", "dep:metrics-exporter-prometheus"]
+exporter-loki = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-loki", "dep:url", "tokio/rt"]
+exporter-otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+# Live, decentralized, per-node fault-tree probability recomputation
+# (`etdl.live-reliability` supplement). Off by default — a plain build's
+# BranchMonitor/codegen behavior is completely unaffected. See
+# docs/reference/live-reliability.md.
+live-reliability = ["dep:etdl-probability-core"]
+
 [dependencies]
 getrandom = "0.2"
 regex = "1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "sync"] }
+etdl-probability-core = { version = "0.3.1", path = "../etdl-probability-core", optional = true }
+
+# exporter-prometheus: a compiled-in Prometheus scrape endpoint. `metrics`
+# is the ambient, global-recorder facade `BranchMonitor` emits through;
+# `metrics-exporter-prometheus` installs the recorder *and* runs its own
+# embedded HTTP listener — no hand-rolled server code needed.
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.18", optional = true }
+
+# exporter-loki: push structured observations to a Loki-compatible push
+# API (LogQL). `tracing` is the ambient, global-subscriber facade
+# `BranchMonitor` emits through; `tracing-loki` batches and pushes.
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+tracing-loki = { version = "0.2", optional = true }
+url = { version = "2", optional = true }
+
+# exporter-otlp: push metrics to an OTel Collector via the official
+# OpenTelemetry Rust SDK, over HTTP+protobuf (not gRPC/tonic — no extra
+# codegen toolchain needed to build). `PeriodicReader` drives export on its
+# own dedicated background thread (not a caller-provided async runtime), so
+# the *blocking* reqwest client is the correct, documented choice here —
+# not the async `reqwest-client`, which requires an active Tokio reactor on
+# whatever thread it's polled from and panics on that dedicated thread
+# without one. Metrics only for now (not logs/traces) — see
+# docs/reference/observability-exporters.md for the scoping rationale.
+opentelemetry = { version = "0.32", optional = true, default-features = false, features = ["metrics"] }
+opentelemetry_sdk = { version = "0.32", optional = true, default-features = false, features = ["metrics"] }
+opentelemetry-otlp = { version = "0.32", optional = true, default-features = false, features = ["http-proto", "reqwest-blocking-client", "metrics"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

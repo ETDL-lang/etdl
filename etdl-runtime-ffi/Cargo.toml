@@ -21,9 +21,20 @@ name = "etdl_runtime_ffi"
 # built artifact) without going through the C ABI itself.
 crate-type = ["cdylib", "staticlib", "rlib"]
 
+[features]
+# Forward etdl-core's observability exporters straight through, so the
+# shared library built for a non-Rust target can opt into them the same
+# way the Rust target does. See docs/reference/observability-exporters.md.
+exporter-prometheus = ["etdl-core/exporter-prometheus"]
+exporter-loki = ["etdl-core/exporter-loki", "dep:url"]
+exporter-otlp = ["etdl-core/exporter-otlp"]
+
 [dependencies]
 etdl-core = { version = "0.3.1", path = "../etdl-core" }
 serde_json.workspace = true
+# Only needed to parse a C string into the `url::Url` etdl_core::exporters
+# ::loki::install expects; gated the same as exporter-loki above.
+url = { version = "2", optional = true }
 
 [build-dependencies]
 cbindgen = "0.29"

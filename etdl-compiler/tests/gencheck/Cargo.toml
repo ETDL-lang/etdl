@@ -12,9 +12,39 @@ license = "Apache-2.0"
 [features]
 gen-check = []
 gen-check-inline = []
+# Proves generated code still compiles cleanly against an etdl-core built
+# with each observability exporter feature on — combine with `gen-check`,
+# e.g. `--features gen-check,gen-check-prometheus`.
+gen-check-prometheus = ["etdl-core/exporter-prometheus"]
+gen-check-loki = ["etdl-core/exporter-loki"]
+gen-check-otlp = ["etdl-core/exporter-otlp"]
+# Runs (not just compiles) the live-reliability fixture's generated
+# handler, driving `etdl_core::live::record_observation` directly (as an
+# application author would from their own handler code — see
+# docs/reference/live-reliability.md) to prove branch selection actually
+# changes when the live estimate drifts, not just that it compiles.
+gen-check-live-reliability = ["etdl-core/live-reliability"]
+# Two-service cross-process proof: `-producer` and `-consumer` are each
+# compiled and run in their own separate `cargo run` subprocess (never both
+# at once — each has its own process-local `etdl_core::live` registry, the
+# same isolation two real deployed services would have), handing off the
+# producer's `outbound_snapshot` headers to the consumer through a file
+# named by `ETDL_LIVE_RELIABILITY_HANDOFF` (a stand-in for "the next
+# message crossing a real broker" — no in-process shortcut, no shared
+# registry). See docs/reference/live-reliability.md.
+gen-check-live-reliability-producer = ["etdl-core/live-reliability"]
+gen-check-live-reliability-consumer = ["etdl-core/live-reliability"]
+# Runs the performance-check fixture's generated handlers, proving two
+# things under real async execution: the maxConcurrency-bounded Operation
+# genuinely never runs more than its declared limit concurrently, and
+# performance.in_budget-driven branch selection actually flips once
+# observed latency drifts past the linked budget's declared ceiling.
+# `etdl_core::perf` is always compiled in (no feature to enable) — see
+# docs/reference/performance-supplement.md.
+gen-check-performance = []
 
 [dependencies]
 etdl-core = { path = "../../../etdl-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }

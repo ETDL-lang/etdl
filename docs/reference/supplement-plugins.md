@@ -8,9 +8,8 @@ a plugin in a language other than Rust; a Rust author should use
 [`etdl-supplement-sdk`](https://github.com/ETDL-lang/etdl/tree/main/etdl-supplement-sdk)
 instead of implementing this ABI by hand.
 
-Requires `etdl-cli` built with the `plugins` feature (not on by default —
-it pulls in `wasmtime`, a full Cranelift JIT, a much heavier dependency
-than anything else this binary optionally links).
+Always compiled into `etdl-cli` (not feature-gated) — no rebuild flag is
+needed to use it.
 
 ## The three reuse tiers
 
@@ -28,8 +27,8 @@ code, not compiled into `etdl-cli`.
 ## Commands
 
 ```bash
-etdl supplement install <path-or-https-url>   # loads it once to check conformance, then installs
-etdl supplement list                          # built-in extensions + installed plugins
+etdl install <path-or-https-url>   # loads it once to check conformance, then installs
+etdl supplement list               # built-in extensions + installed plugins
 etdl supplement remove <id>
 ```
 

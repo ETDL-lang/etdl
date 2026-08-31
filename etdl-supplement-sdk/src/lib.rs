@@ -1,8 +1,8 @@
 //! SDK for writing ETDL supplement plugins.
 //!
 //! A supplement plugin is a `wasm32-unknown-unknown` module `etdl-cli`
-//! loads dynamically (`etdl supplement install`) and runs sandboxed —
-//! no ambient filesystem, network, or clock access — via `wasmtime` in
+//! loads dynamically (`etdl install`) and runs sandboxed — no ambient
+//! filesystem, network, or clock access — via `wasmtime` in
 //! `etdl-compiler`'s `WasmExtension` host adapter.
 //!
 //! This crate hides the wire format (a small alloc/dealloc + JSON-over-

@@ -10,6 +10,11 @@
 #   E  ETDL + ontology               -p etdl-reliability-ontology
 #   F  all features                  --workspace --all-features
 #   G  WASM-compatible feature set   -p etdl-wasm (wasm32-unknown-unknown)
+#   H  etdl-conformance, lean        -p etdl-conformance --no-default-features
+#   I  etdl-cli, fully lean          -p etdl-cli --no-default-features
+#   J  all observability exporters   -p etdl-core --features exporter-prometheus,exporter-loki,exporter-otlp
+#   K  same, via the non-Rust C ABI  -p etdl-runtime-ffi --no-default-features --features exporter-prometheus,exporter-loki,exporter-otlp
+#   L  live reliability engine       -p etdl-core --features live-reliability
 #
 # Usage: scripts/feature-matrix.sh [--check]
 #   --check : run `cargo check` only (fast). Default: check.
@@ -86,6 +91,24 @@ echo "========================================"
 echo " I: etdl-cli, fully lean (no features at all)"
 echo "========================================"
 run "${CARGO_CMD[@]}" -p etdl-cli --no-default-features
+
+echo
+echo "========================================"
+echo " J: etdl-core, all observability exporters at once"
+echo "========================================"
+run "${CARGO_CMD[@]}" -p etdl-core --features exporter-prometheus,exporter-loki,exporter-otlp
+
+echo
+echo "========================================"
+echo " K: etdl-runtime-ffi, all observability exporters at once"
+echo "========================================"
+run "${CARGO_CMD[@]}" -p etdl-runtime-ffi --no-default-features --features exporter-prometheus,exporter-loki,exporter-otlp
+
+echo
+echo "========================================"
+echo " L: etdl-core, live reliability engine"
+echo "========================================"
+run "${CARGO_CMD[@]}" -p etdl-core --features live-reliability
 
 echo
 echo "All feature combinations OK."

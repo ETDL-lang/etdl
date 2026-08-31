@@ -1,0 +1,97 @@
+etdl: "1.0.0"
+info:
+  title: "Performance Supplement end-to-end check"
+  version: "1.0.0"
+  domain: "Test"
+  description: "Two independent event trees, deliberately kept separate so the two proofs don't interact: ConcurrencyCheck exercises the hard maxConcurrency guarantee via a directly-reached Operation (no Barrier pre-check, which would otherwise route calls to DEGRADED once the concurrency limit saturates in_budget, masking whether the semaphore itself actually blocks); LatencyCheck exercises performance.in_budget branch selection via a Barrier-linked budget with no maxConcurrency of its own, so latency drift is the only thing that can flip it. No asyncapi_imports — inline components.messages, matching live-reliability.etdl's pattern."
+
+components:
+  messages:
+    Trigger:
+      name: Trigger
+      payload:
+        type: object
+
+supplements:
+  - id: etdl.performance
+    version: "1.0"
+
+x-performance:
+  budgets:
+    - id: concurrency-budget
+      nodeRef: "#/eventTrees/ConcurrencyCheck/nodes/ConcurrencyOp"
+      p50Ms: 1000
+      p95Ms: 1000
+      p99Ms: 1000
+      maxConcurrency: 2
+    - id: latency-budget
+      nodeRef: "#/eventTrees/LatencyCheck/nodes/LatencyOp"
+      p50Ms: 5
+      p95Ms: 5
+      p99Ms: 5
+  barrierChecks:
+    - id: latency-guard
+      nodeRef: "#/eventTrees/LatencyCheck/nodes/LatencyBarrier"
+      budgetRef: latency-budget
+
+eventTrees:
+  ConcurrencyCheck:
+    initiatingEvent:
+      id: ConcurrencyTrigger
+      message: "#/components/messages/Trigger"
+      next: ConcurrencyOp
+    nodes:
+      ConcurrencyOp:
+        type: operation
+        action: execute
+        handler: "concurrencyOp"
+        next: ConcurrencyDone
+
+      ConcurrencyDone:
+        type: consequence
+        operation: terminate
+
+  LatencyCheck:
+    initiatingEvent:
+      id: LatencyTrigger
+      message: "#/components/messages/Trigger"
+      next: LatencyBarrier
+    nodes:
+      LatencyBarrier:
+        type: barrier
+        description: "Branch selection is driven by latency-budget's live status, not any field on this branch itself — resolved via x-performance.barrierChecks above."
+        branches:
+          - outcome: OK
+            condition: "performance.in_budget == true"
+            probability: 0.99
+            next: LatencyOp
+          - outcome: DEGRADED
+            condition: default
+            probability: 0.01
+            next: DegradedConsequence
+
+      LatencyOp:
+        type: operation
+        action: execute
+        handler: "latencyOp"
+        # Explicit, larger than the test's simulated slow-handler delay —
+        # keeps latency-budget's tiny p99Ms from also becoming the
+        # enforced timeout (Section 6.2: an explicit timeoutMs always
+        # wins). Otherwise a call slow enough to exceed p99Ms would be cut
+        # off by the timeout at ~p99Ms before it could ever be *observed*
+        # exceeding it, making the p99Ms>=observed check in in_budget
+        # vacuously true no matter how slow the real handler is.
+        timeoutMs: 500
+        next: OkConsequence
+
+      OkConsequence:
+        type: consequence
+        operation: send
+        channel: "ok-channel"
+        message: "#/components/messages/Trigger"
+
+      DegradedConsequence:
+        type: consequence
+        operation: send
+        channel: "degraded-channel"
+        message: "#/components/messages/Trigger"

@@ -972,9 +972,8 @@ faultTrees:
         let _ = std::fs::remove_dir_all(&out_dir);
     }
 
-    // --- Dynamic supplement plugins (`etdl supplement install/list/remove`) ---
+    // --- Dynamic supplement plugins (`etdl install`, `etdl supplement list/remove`) ---
 
-    #[cfg(feature = "plugins")]
     mod supplement_plugins {
         use super::*;
         use std::path::Path;
@@ -1026,7 +1025,7 @@ faultTrees:
 
             let (out, stdout) = run_cli_with_home(
                 &home,
-                &["supplement", "install", wasm_fixture("valid.wasm").to_str().unwrap()],
+                &["install", wasm_fixture("valid.wasm").to_str().unwrap()],
             );
             assert_eq!(out.status.code(), Some(0), "install failed: {stdout}");
             assert!(stdout.contains("etdl.fixture-valid"));
@@ -1054,10 +1053,7 @@ faultTrees:
             let bad_file = home.join("not-a-plugin.wasm");
             std::fs::write(&bad_file, b"this is not a wasm module").unwrap();
 
-            let (out, stdout) = run_cli_with_home(
-                &home,
-                &["supplement", "install", bad_file.to_str().unwrap()],
-            );
+            let (out, stdout) = run_cli_with_home(&home, &["install", bad_file.to_str().unwrap()]);
             assert_eq!(out.status.code(), Some(1));
             let stderr = String::from_utf8_lossy(&out.stderr);
             assert!(
@@ -1077,7 +1073,7 @@ faultTrees:
             let home = scratch_home();
             let (out, _) = run_cli_with_home(
                 &home,
-                &["supplement", "install", wasm_fixture("valid.wasm").to_str().unwrap()],
+                &["install", wasm_fixture("valid.wasm").to_str().unwrap()],
             );
             assert_eq!(out.status.code(), Some(0));
 

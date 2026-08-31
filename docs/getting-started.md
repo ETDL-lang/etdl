@@ -17,15 +17,12 @@ This installs the `etdl` binary with `compile` and `validate` subcommands.
 
 ### Alternative: install from a clone
 
-Build from source if you want the `plugins` feature (dynamic, sandboxed
-`.wasm` supplements — off by default in the published crate too, see
-[Supplement Plugins](reference/supplement-plugins.md)) or you're tracking an
-unreleased change:
+Build from source if you're tracking an unreleased change:
 
 ```bash
 git clone https://github.com/ETDL-lang/etdl.git
 cd etdl
-cargo build --release -p etdl-cli --features plugins
+cargo build --release -p etdl-cli
 ```
 
 The binary lands at `target/release/etdl`. See

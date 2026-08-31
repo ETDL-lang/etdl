@@ -70,7 +70,7 @@ pub async fn handle_order_placed_trigger(message: OrderPlaced) -> Result<(), Wor
     let mut inventory_check_barrier = BranchMonitor::new("InventoryCheckBarrier");
 
     if message.payload.items.iter().all(|item| item.qty > 0) {
-        inventory_check_barrier.record_branch("SUCCESS", 0.950000);
+        inventory_check_barrier.record_branch("InventoryCheckBarrier", "SUCCESS", 0.950000);
         let retry = RetryPolicy {
             max_attempts: 3,
             backoff_ms: 250,
@@ -86,7 +86,7 @@ pub async fn handle_order_placed_trigger(message: OrderPlaced) -> Result<(), Wor
             }
         }
     } else {
-        inventory_check_barrier.record_branch("FAILURE", 0.050000);
+        inventory_check_barrier.record_branch("InventoryCheckBarrier", "FAILURE", 0.050000);
         publish_to_channel("DeadLetterChannel", message).await?;
     }
     Ok(())

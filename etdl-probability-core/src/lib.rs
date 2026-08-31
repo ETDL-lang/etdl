@@ -54,10 +54,12 @@
 //! "Built-in vs. optional" section for the rationale.
 
 pub mod distribution;
+pub mod gate;
 mod numerics;
 pub mod probability;
 pub mod rate;
 
+pub use gate::GateError;
 pub use probability::{
     bayes, complement, conditional, independent_and, independent_and_n, independent_or,
     independent_or_n, mutually_exclusive_or, Probability, ProbabilityError,

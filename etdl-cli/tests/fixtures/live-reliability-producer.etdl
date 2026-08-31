@@ -1,0 +1,52 @@
+etdl: "1.0.0"
+info:
+  title: "Live Reliability Supplement two-service check — producer"
+  version: "1.0.0"
+  domain: "Test"
+  description: "The 'upstream' half of a two-service pair proving cross-process propagation of live-reliability data (see live-reliability-consumer.etdl). This service owns GatewayFailure's only basic event as 'local' — it drives the live estimate from its own observations and attaches the fault tree's current values to every outgoing message's headers. No barrier: initiatingEvent goes straight to a send Consequence, which is enough to exercise the header-attachment codegen path (Part 5's render_publish_call)."
+
+components:
+  messages:
+    Trigger:
+      name: Trigger
+      payload:
+        type: object
+
+faultTrees:
+  GatewayFailure:
+    description: "A single basic event, live-tracked and locally observed by this service."
+    topEvent:
+      id: GatewayFailureTop
+      description: "The gateway is unreachable."
+      rootCause: GatewayUnreachable
+    basicEvents:
+      GatewayUnreachable:
+        description: "The payment gateway cannot be reached."
+        probability: 0.1
+
+x-live-reliability:
+  faultTrees:
+    - id: GatewayFailure
+      threshold: 0.3
+      basicEvents:
+        - id: GatewayUnreachable
+          source: local
+          priorStrength: 10
+
+supplements:
+  - id: etdl.live-reliability
+    version: "1.0"
+
+eventTrees:
+  ProducerFlow:
+    initiatingEvent:
+      id: ProducerTrigger
+      message: "#/components/messages/Trigger"
+      next: PropagateConsequence
+
+    nodes:
+      PropagateConsequence:
+        type: consequence
+        operation: send
+        channel: "propagated-reliability"
+        message: "#/components/messages/Trigger"

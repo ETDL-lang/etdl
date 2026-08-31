@@ -1,0 +1,69 @@
+etdl: "1.0.0"
+info:
+  title: "Live Reliability Supplement two-service check — consumer"
+  version: "1.0.0"
+  domain: "Test"
+  description: "The 'downstream' half of a two-service pair (see live-reliability-producer.etdl). This service declares the SAME fault-tree id (GatewayFailure) and basic-event id (GatewayUnreachable) as the producer — cross-document node identity is matched by convention, not compiler-verified, same as asyncapi_imports/channel names elsewhere in the language — but marks the basic event 'inbound': this service never calls record_observation for it, only ever receives its value via apply_inbound (emitted automatically by codegen at the top of any handler in a document that declares an inbound basic event). Branch selection is driven by reliability.in_range against that inbound-only value."
+
+components:
+  messages:
+    Trigger:
+      name: Trigger
+      payload:
+        type: object
+
+faultTrees:
+  GatewayFailure:
+    description: "Same fault-tree id as the producer service, by convention. This service's basic event is fed only via inbound headers, never local observation."
+    topEvent:
+      id: GatewayFailureTop
+      description: "The gateway is unreachable."
+      rootCause: GatewayUnreachable
+    basicEvents:
+      GatewayUnreachable:
+        description: "The payment gateway cannot be reached."
+        probability: 0.1
+
+x-live-reliability:
+  faultTrees:
+    - id: GatewayFailure
+      threshold: 0.3
+      basicEvents:
+        - id: GatewayUnreachable
+          source: inbound
+
+supplements:
+  - id: etdl.live-reliability
+    version: "1.0"
+
+eventTrees:
+  ConsumerFlow:
+    initiatingEvent:
+      id: ConsumerTrigger
+      message: "#/components/messages/Trigger"
+      next: RiskBarrier
+
+    nodes:
+      RiskBarrier:
+        type: barrier
+        description: "Branch selection is driven by this service's own live view of GatewayFailure — a view it never observes directly, only ever receives from the producer via apply_inbound."
+        branches:
+          - outcome: NORMAL
+            condition: "reliability.in_range == true"
+            probabilitySource: "#/faultTrees/GatewayFailure/topEvent"
+            next: NormalConsequence
+          - outcome: ABNORMAL
+            condition: "default"
+            next: AbnormalConsequence
+
+      NormalConsequence:
+        type: consequence
+        operation: send
+        channel: "normal-channel"
+        message: "#/components/messages/Trigger"
+
+      AbnormalConsequence:
+        type: consequence
+        operation: send
+        channel: "abnormal-channel"
+        message: "#/components/messages/Trigger"

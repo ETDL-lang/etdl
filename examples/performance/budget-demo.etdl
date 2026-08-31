@@ -1,10 +1,16 @@
 # Performance Supplement demo: one budget on a single Operation node
 # (ProcessPaymentOperation), and one whole-tree, end-to-end budget on
 # OrderFulfillment itself — the two `nodeRef` shapes the spec allows
-# (`ETDL-Performance-Supplement.md` Section 4.1). Purely declarative: no
-# runtime enforcement, no probability math, no effect on generated code
-# (Section 6/7) — comment out the `etdl.performance` line under
-# `supplements:` below and re-validate to see that for yourself.
+# (`ETDL-Performance-Supplement.md` Section 4.1) — plus a Barrier Check
+# (Section 4.2) linking PaymentPerfBarrier to the Operation-level budget,
+# so it can branch on `performance.in_budget` (Section 6.3). Unlike
+# earlier revisions of this supplement, none of this is purely
+# declarative anymore: generated code structurally enforces
+# maxConcurrency/expectedRatePerSecond, derives a real timeout from
+# p99Ms, and PaymentPerfBarrier's branch selection is driven by the
+# budget's live status (Section 6) — comment out the `etdl.performance`
+# line under `supplements:` below and re-validate/re-compile to see the
+# document (and generated code) fall back to having none of that.
 
 etdl: "1.0.0"
 info:
@@ -32,11 +38,23 @@ eventTrees:
           - outcome: SUCCESS
             condition: "message.payload.items[*].qty > 0"
             probability: 0.95
-            next: ProcessPaymentOperation
+            next: PaymentPerfBarrier
           - outcome: FAILURE
             condition: default
             probability: 0.05
             next: OutOfStockConsequence
+      PaymentPerfBarrier:
+        type: barrier
+        description: "Branch selection is driven by whether process-payment-budget is currently being met (Section 6.3) — linked via x-performance.barrierChecks below, not by any field on this branch itself."
+        branches:
+          - outcome: OK
+            condition: "performance.in_budget == true"
+            probability: 0.99
+            next: ProcessPaymentOperation
+          - outcome: DEGRADED
+            condition: default
+            probability: 0.01
+            next: PaymentThrottledConsequence
       ProcessPaymentOperation:
         type: operation
         action: execute
@@ -47,6 +65,9 @@ eventTrees:
         type: consequence
         operation: terminate
       PaymentFailedConsequence:
+        type: consequence
+        operation: terminate
+      PaymentThrottledConsequence:
         type: consequence
         operation: terminate
       OutOfStockConsequence:
@@ -71,3 +92,10 @@ x-performance:
       p50Ms: 400
       p95Ms: 2500
       p99Ms: 5000
+
+  barrierChecks:
+    # Links PaymentPerfBarrier to process-payment-budget: that barrier's
+    # `performance.in_budget` resolves to *this* budget's live status.
+    - id: payment-perf-guard
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/PaymentPerfBarrier"
+      budgetRef: process-payment-budget

@@ -109,4 +109,20 @@ fn generated_code_compiles() {
     compile_and_check(IN_MATCHES_FIXTURE, "gen-check");
     compile_and_check(INLINE_MESSAGES_FIXTURE, "gen-check-inline");
     compile_and_check(ECEL_EXTENDED_FIXTURE, "gen-check-inline");
+
+    // Generated code takes no dependency on any `etdl-core` exporter
+    // feature (`BranchMonitor`'s `record_*` calls stay the same either way
+    // — the exporters hook in inside `etdl-core` itself, see
+    // `docs/reference/observability-exporters.md`), so this is a guard
+    // against a regression where enabling one somehow broke that: generated
+    // code must still compile unchanged against an `etdl-core` built with
+    // all three at once. Runtime behavior of each exporter (a real
+    // scrape/push actually arriving) is proven directly in `etdl-core`'s
+    // own tests, not here — this harness only ever `cargo check`s (see
+    // `compile_and_check` above), it never executes the generated binary.
+    // Kept in this same test function (not a separate `#[test]`) because
+    // every `compile_and_check` call shares one `generated.rs` file and
+    // `gencheck` directory — two test *functions* calling it would race
+    // under the default parallel test runner.
+    compile_and_check(FIXTURE, "gen-check,gen-check-prometheus,gen-check-loki,gen-check-otlp");
 }

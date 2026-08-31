@@ -98,8 +98,11 @@ From `etdl-core/src/retry.rs` (`RetryPolicy::execute`):
 Per event tree, generated code (Rust backend):
 
 - emits `pub async fn handle_<snake_case(id)>(message: <Type>, publisher: &dyn Publisher) -> Result<(), WorkflowError>`,
-- creates a `BranchMonitor` per reached barrier,
-- records `record_branch(outcome, effective_probability)` on the taken branch,
+- creates one `BranchMonitor` per handler call, reused across every barrier
+  the traversal reaches,
+- records `record_branch(node_id, outcome, effective_probability)` on the
+  taken branch — `node_id` is that specific barrier's own id, so reuse of
+  one monitor across several barriers still attributes each one correctly,
 - runs operations via `RetryPolicy` with the declared timeout,
 - records `record_failure(node_id, &err, Some(linked_probability)|None)` on
   failure,

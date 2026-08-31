@@ -26,7 +26,7 @@
 //! use std::time::Duration;
 //!
 //! let mut monitor = BranchMonitor::new("InventoryCheckBarrier");
-//! monitor.record_branch("SUCCESS", 0.95);
+//! monitor.record_branch("InventoryCheckBarrier", "SUCCESS", 0.95);
 //!
 //! let retry = RetryPolicy {
 //!     max_attempts: 3,
@@ -37,8 +37,12 @@
 
 pub mod chaos;
 pub mod condition;
+pub mod exporters;
+#[cfg(feature = "live-reliability")]
+pub mod live;
 pub mod monitor;
 pub mod observation;
+pub mod perf;
 pub mod publisher;
 pub mod retry;
 pub mod sla;

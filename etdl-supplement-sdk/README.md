@@ -24,7 +24,7 @@ etdl_supplement_sdk::etdl_supplement!(MyAudit);
 
 ```bash
 cargo build --target wasm32-unknown-unknown --release
-etdl supplement install target/wasm32-unknown-unknown/release/my_audit.wasm
+etdl install target/wasm32-unknown-unknown/release/my_audit.wasm
 ```
 
 A plugin runs sandboxed: no filesystem, network, or clock access, and

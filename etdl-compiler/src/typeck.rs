@@ -53,7 +53,7 @@ pub fn type_check_conditions(
                             );
                         }
 
-                        check_bool_expr(&ctx, expr, tree_name, node_id, i, diagnostics);
+                        check_bool_expr(&ctx, expr, tree_name, node_id, i, true, diagnostics);
                     }
                 }
             }
@@ -81,22 +81,34 @@ struct MessageContext<'a> {
     registry: &'a AsyncApiRegistry,
 }
 
+/// `top_level`: `true` only when `expr` *is* the branch's entire
+/// condition (the call from `type_check_conditions`); `false` for
+/// anything reached through `And`/`Or`/`Not` recursion. Distinguishes
+/// "the whole condition is `reliability.in_range == true`" (supported,
+/// see `docs/reference/live-reliability.md`) from "`reliability.in_range`
+/// combined with other terms" (rejected as E-173 — codegen's
+/// `condition_to_rust_code` only special-cases the bare top-level shape;
+/// nesting it would otherwise silently fall through to the ordinary
+/// message-path renderer and produce meaningless generated code).
 fn check_bool_expr(
     ctx: &MessageContext,
     expr: &BoolExpr,
     tree_name: &str,
     node_id: &str,
     branch_idx: usize,
+    top_level: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     match expr {
         BoolExpr::And(a, b) | BoolExpr::Or(a, b) => {
-            check_bool_expr(ctx, a, tree_name, node_id, branch_idx, diagnostics);
-            check_bool_expr(ctx, b, tree_name, node_id, branch_idx, diagnostics);
+            check_bool_expr(ctx, a, tree_name, node_id, branch_idx, false, diagnostics);
+            check_bool_expr(ctx, b, tree_name, node_id, branch_idx, false, diagnostics);
         }
-        BoolExpr::Not(a) => check_bool_expr(ctx, a, tree_name, node_id, branch_idx, diagnostics),
+        BoolExpr::Not(a) => {
+            check_bool_expr(ctx, a, tree_name, node_id, branch_idx, false, diagnostics)
+        }
         BoolExpr::Comparison(cmp) => {
-            check_comparison_type(ctx, cmp, tree_name, node_id, branch_idx, diagnostics)
+            check_comparison_type(ctx, cmp, tree_name, node_id, branch_idx, top_level, diagnostics)
         }
         BoolExpr::Quantifier(q) => {
             check_quantifier(ctx, q, tree_name, node_id, branch_idx, diagnostics)
@@ -133,7 +145,7 @@ fn check_quantifier(
             }),
         );
     }
-    check_comparison_type(ctx, &q.comparison, tree_name, node_id, branch_idx, diagnostics);
+    check_comparison_type(ctx, &q.comparison, tree_name, node_id, branch_idx, false, diagnostics);
 }
 
 /// Rule V-208 (spec §6.4.1): a `defined-expr`'s `path-expr` must resolve
@@ -180,10 +192,11 @@ fn check_comparison_type(
     tree_name: &str,
     node_id: &str,
     branch_idx: usize,
+    top_level: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    check_operand(ctx, &cmp.left, tree_name, node_id, branch_idx, diagnostics);
-    check_operand(ctx, &cmp.right, tree_name, node_id, branch_idx, diagnostics);
+    check_operand(ctx, &cmp.left, tree_name, node_id, branch_idx, top_level, diagnostics);
+    check_operand(ctx, &cmp.right, tree_name, node_id, branch_idx, top_level, diagnostics);
 
     let left_type = resolve_operand_type(ctx, &cmp.left);
     let right_type = resolve_operand_type(ctx, &cmp.right);
@@ -306,10 +319,11 @@ fn check_operand(
     tree_name: &str,
     node_id: &str,
     branch_idx: usize,
+    top_level: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if let Operand::Value(v) = operand {
-        check_value_expr(ctx, v, tree_name, node_id, branch_idx, diagnostics);
+        check_value_expr(ctx, v, tree_name, node_id, branch_idx, top_level, diagnostics);
     }
 }
 
@@ -319,6 +333,7 @@ fn check_value_expr(
     tree_name: &str,
     node_id: &str,
     branch_idx: usize,
+    top_level: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let key = || SpanKey::BranchField {
@@ -329,9 +344,81 @@ fn check_value_expr(
     };
 
     match expr {
+        ValueExpr::Path(path_expr) if is_reliability_root(path_expr) => {
+            if !crate::validate::declares_supplement(ctx.doc, "etdl.live-reliability") {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-173",
+                        format!(
+                            "barrier '{}' branch {}: '{}' requires the document to declare supplement etdl.live-reliability",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if reliability_path_type(path_expr) == EcelType::Unknown {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-173",
+                        format!(
+                            "barrier '{}' branch {}: 'reliability' path must be exactly 'reliability.in_range', got '{}'",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if !top_level {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-173",
+                        format!(
+                            "barrier '{}' branch {}: 'reliability.in_range' must be the entire branch condition, not combined with &&/||/! — split it into its own branch",
+                            node_id, branch_idx
+                        ),
+                    )
+                    .at(key()),
+                );
+            }
+        }
+        ValueExpr::Path(path_expr) if is_performance_root(path_expr) => {
+            if !crate::validate::declares_supplement(ctx.doc, "etdl.performance") {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-163",
+                        format!(
+                            "barrier '{}' branch {}: '{}' requires the document to declare supplement etdl.performance",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if performance_path_type(path_expr) == EcelType::Unknown {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-163",
+                        format!(
+                            "barrier '{}' branch {}: 'performance' path must be exactly 'performance.in_budget', got '{}'",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if !top_level {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-163",
+                        format!(
+                            "barrier '{}' branch {}: 'performance.in_budget' must be the entire branch condition, not combined with &&/||/! — split it into its own branch",
+                            node_id, branch_idx
+                        ),
+                    )
+                    .at(key()),
+                );
+            }
+        }
         ValueExpr::Path(_) | ValueExpr::Number(_) => {}
         ValueExpr::Call(func, arg) => {
-            check_value_expr(ctx, arg, tree_name, node_id, branch_idx, diagnostics);
+            check_value_expr(ctx, arg, tree_name, node_id, branch_idx, false, diagnostics);
             let arg_type = resolve_value_expr_type(ctx, arg);
             let ok = match (func, &arg_type) {
                 (_, EcelType::Unknown) => true,
@@ -365,14 +452,14 @@ fn check_value_expr(
             }
         }
         ValueExpr::Add(a, b) | ValueExpr::Sub(a, b) | ValueExpr::Mul(a, b) => {
-            check_value_expr(ctx, a, tree_name, node_id, branch_idx, diagnostics);
-            check_value_expr(ctx, b, tree_name, node_id, branch_idx, diagnostics);
+            check_value_expr(ctx, a, tree_name, node_id, branch_idx, false, diagnostics);
+            check_value_expr(ctx, b, tree_name, node_id, branch_idx, false, diagnostics);
             check_arithmetic_operand(ctx, a, tree_name, node_id, branch_idx, diagnostics);
             check_arithmetic_operand(ctx, b, tree_name, node_id, branch_idx, diagnostics);
         }
         ValueExpr::Div(a, b) => {
-            check_value_expr(ctx, a, tree_name, node_id, branch_idx, diagnostics);
-            check_value_expr(ctx, b, tree_name, node_id, branch_idx, diagnostics);
+            check_value_expr(ctx, a, tree_name, node_id, branch_idx, false, diagnostics);
+            check_value_expr(ctx, b, tree_name, node_id, branch_idx, false, diagnostics);
             check_arithmetic_operand(ctx, a, tree_name, node_id, branch_idx, diagnostics);
             check_arithmetic_operand(ctx, b, tree_name, node_id, branch_idx, diagnostics);
             if let ValueExpr::Number(n) = b.as_ref() {
@@ -459,6 +546,12 @@ fn resolve_operand_type(ctx: &MessageContext, operand: &Operand) -> EcelType {
 
 fn resolve_value_expr_type(ctx: &MessageContext, expr: &ValueExpr) -> EcelType {
     match expr {
+        ValueExpr::Path(path_expr) if is_reliability_root(path_expr) => {
+            reliability_path_type(path_expr)
+        }
+        ValueExpr::Path(path_expr) if is_performance_root(path_expr) => {
+            performance_path_type(path_expr)
+        }
         ValueExpr::Path(path_expr) => {
             let segments: Vec<&PathSegment> = path_expr.segments.iter().skip(1).collect();
 
@@ -490,6 +583,65 @@ fn resolve_value_expr_type(ctx: &MessageContext, expr: &ValueExpr) -> EcelType {
             FuncName::Lower | FuncName::Upper => EcelType::String,
         },
     }
+}
+
+/// Whether `path_expr` is rooted at the `reliability` keyword (the Live
+/// Reliability Supplement's `reliability.in_range`, see `docs/reference/
+/// live-reliability.md`) rather than the ordinary `message` root.
+fn is_reliability_root(path_expr: &PathExpr) -> bool {
+    matches!(path_expr.segments.first(), Some(PathSegment::Field(s)) if s == "reliability")
+}
+
+/// `reliability.in_range` (exactly two segments, the second literally
+/// `in_range`) types as `Bool`; anything else under the `reliability` root
+/// is `Unknown` here — `check_value_expr`'s dedicated E-173 check is what
+/// actually rejects it, since (unlike an unresolvable `message.*` path,
+/// which is tolerated as legitimately dynamic) every `reliability.*` shape
+/// is fully known at compile time and a typo should never be silently
+/// accepted.
+fn reliability_path_type(path_expr: &PathExpr) -> EcelType {
+    match path_expr.segments.as_slice() {
+        [PathSegment::Field(_root), PathSegment::Field(name)] if name == "in_range" => {
+            EcelType::Bool
+        }
+        _ => EcelType::Unknown,
+    }
+}
+
+/// Whether `path_expr` is rooted at the `performance` keyword (the
+/// Performance Supplement's `performance.in_budget`, see `docs/reference/
+/// performance-supplement.md`) rather than the ordinary `message` root.
+fn is_performance_root(path_expr: &PathExpr) -> bool {
+    matches!(path_expr.segments.first(), Some(PathSegment::Field(s)) if s == "performance")
+}
+
+/// `performance.in_budget` (exactly two segments, the second literally
+/// `in_budget`) types as `Bool`; anything else under the `performance`
+/// root is `Unknown` here — mirrors `reliability_path_type` exactly, same
+/// rationale: every `performance.*` shape is fully known at compile time,
+/// so a typo should never be silently accepted the way an unresolvable
+/// `message.*` path is.
+fn performance_path_type(path_expr: &PathExpr) -> EcelType {
+    match path_expr.segments.as_slice() {
+        [PathSegment::Field(_root), PathSegment::Field(name)] if name == "in_budget" => {
+            EcelType::Bool
+        }
+        _ => EcelType::Unknown,
+    }
+}
+
+fn path_to_string(path_expr: &PathExpr) -> String {
+    path_expr
+        .segments
+        .iter()
+        .map(|s| match s {
+            PathSegment::Field(f) => f.clone(),
+            PathSegment::Wildcard => "[*]".to_string(),
+            PathSegment::Index(i) => format!("[{i}]"),
+            PathSegment::QuotedKey(k) => format!("[\"{k}\"]"),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 fn literal_to_ecel_type(lit: &Literal) -> EcelType {
@@ -537,4 +689,202 @@ fn schema_to_ecel_type(schema: &serde_json::Value) -> EcelType {
     }
 
     EcelType::Unknown
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal document (inline messages, no `asyncapi_imports` needed —
+    /// see spec Section 5.4.1) with one barrier whose branch condition is
+    /// `condition_yaml`, optionally declaring `etdl.live-reliability`.
+    fn doc_with_condition(condition_yaml: &str, declare_supplement: bool) -> EtlDocument {
+        doc_with_condition_and_supplement(condition_yaml, declare_supplement, "etdl.live-reliability", "1.0")
+    }
+
+    /// Generalizes [`doc_with_condition`] to declare an arbitrary
+    /// supplement id/version — used for `performance.in_budget`'s own
+    /// mirrored test set below.
+    fn doc_with_condition_and_supplement(
+        condition_yaml: &str,
+        declare_supplement: bool,
+        supplement_id: &str,
+        supplement_version: &str,
+    ) -> EtlDocument {
+        let supplements = if declare_supplement {
+            format!("supplements:\n  - id: {supplement_id}\n    version: \"{supplement_version}\"\n")
+        } else {
+            String::new()
+        };
+        let yaml = format!(
+            r##"
+etdl: "1.0.0"
+info: {{ title: "T", version: "1.0.0", domain: "D" }}
+{supplements}components:
+  messages:
+    M:
+      payload: {{ type: object }}
+eventTrees:
+  T:
+    initiatingEvent: {{ id: I, message: "#/components/messages/M", next: B }}
+    nodes:
+      B:
+        type: barrier
+        branches:
+          - outcome: NORMAL
+            condition: {condition_yaml}
+            next: C
+          - outcome: ABNORMAL
+            condition: default
+            next: C
+      C: {{ type: consequence, operation: terminate }}
+"##
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    fn type_check(doc: &EtlDocument) -> Vec<Diagnostic> {
+        let registry = AsyncApiRegistry::new();
+        let mut diagnostics = Vec::new();
+        type_check_conditions(doc, &registry, &mut diagnostics);
+        diagnostics
+    }
+
+    #[test]
+    fn reliability_in_range_without_the_supplement_declared_is_e173() {
+        let doc = doc_with_condition("\"reliability.in_range == true\"", false);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-173"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn reliability_in_range_with_the_supplement_declared_has_no_diagnostics() {
+        let doc = doc_with_condition("\"reliability.in_range == true\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+    }
+
+    #[test]
+    fn reliability_wrong_shape_is_e173_even_with_the_supplement_declared() {
+        let doc = doc_with_condition("\"reliability.something_else == true\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-173"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn reliability_compared_against_a_string_is_still_e173_not_v204() {
+        // Wrong shape is always E-173, regardless of what it's compared
+        // against — V-204 would otherwise also fire (Bool vs String) and
+        // duplicate the report with a less specific message.
+        let doc = doc_with_condition("\"reliability.something_else == \\\"x\\\"\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-173"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn reliability_in_range_combined_with_and_is_e173() {
+        // Must be the entire branch condition, not nested inside a
+        // combinator — codegen only special-cases the bare top-level
+        // comparison shape.
+        let doc = doc_with_condition(
+            "\"reliability.in_range == true && message.payload.qty > 0\"",
+            true,
+        );
+        let diagnostics = type_check(&doc);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "E-173" && d.message.contains("entire branch condition")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reliability_in_range_negated_is_e173() {
+        let doc = doc_with_condition("\"!(reliability.in_range == true)\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "E-173" && d.message.contains("entire branch condition")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn reliability_in_range_compared_against_a_number_is_v204() {
+        // Correct path shape (typed Bool), but a mismatched comparison
+        // partner — this is an ordinary V-204 type mismatch, not E-173.
+        let doc = doc_with_condition("\"reliability.in_range == 1\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(!diagnostics.iter().any(|d| d.code == "E-173"), "got {diagnostics:?}");
+        assert!(diagnostics.iter().any(|d| d.code == "V-204"), "got {diagnostics:?}");
+    }
+
+    fn doc_with_performance_condition(condition_yaml: &str, declare_supplement: bool) -> EtlDocument {
+        doc_with_condition_and_supplement(condition_yaml, declare_supplement, "etdl.performance", "1.0")
+    }
+
+    #[test]
+    fn performance_in_budget_without_the_supplement_declared_is_e163() {
+        let doc = doc_with_performance_condition("\"performance.in_budget == true\"", false);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-163"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn performance_in_budget_with_the_supplement_declared_has_no_diagnostics() {
+        let doc = doc_with_performance_condition("\"performance.in_budget == true\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+    }
+
+    #[test]
+    fn performance_wrong_shape_is_e163_even_with_the_supplement_declared() {
+        let doc = doc_with_performance_condition("\"performance.something_else == true\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-163"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn performance_compared_against_a_string_is_still_e163_not_v204() {
+        let doc = doc_with_performance_condition("\"performance.something_else == \\\"x\\\"\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-163"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn performance_in_budget_combined_with_and_is_e163() {
+        let doc = doc_with_performance_condition(
+            "\"performance.in_budget == true && message.payload.qty > 0\"",
+            true,
+        );
+        let diagnostics = type_check(&doc);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "E-163" && d.message.contains("entire branch condition")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn performance_in_budget_negated_is_e163() {
+        let doc = doc_with_performance_condition("\"!(performance.in_budget == true)\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "E-163" && d.message.contains("entire branch condition")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn performance_in_budget_compared_against_a_number_is_v204() {
+        let doc = doc_with_performance_condition("\"performance.in_budget == 1\"", true);
+        let diagnostics = type_check(&doc);
+        assert!(!diagnostics.iter().any(|d| d.code == "E-163"), "got {diagnostics:?}");
+        assert!(diagnostics.iter().any(|d| d.code == "V-204"), "got {diagnostics:?}");
+    }
 }

@@ -9,11 +9,12 @@ engineering they do not use.
 
 | Package | Role | Required for `etdl compile`? |
 |---|---|---|
-| `etdl-core` | Runtime types (branch monitors, retry, SLA, telemetry) | No (generated code targets it) |
+| `etdl-core` | Runtime types (branch monitors, retry, SLA, telemetry, observability exporters, live reliability engine) | No (generated code targets it) |
 | `etdl-parser` | Parse `.etdl`, AsyncAPI imports, ECEL | Yes (compiler dependency) |
 | `etdl-compiler` | Validate, resolve fault trees, generate code | Yes |
 | `etdl-cli` | The `etdl` binary | No (consumes the compiler) |
 | `etdl-wasm` | Browser/Node bindings | No |
+| `etdl-runtime-ffi` | Stable C ABI over `etdl-core` for non-Rust `--target`s | No (non-Rust generated code targets it) |
 | `etdl-reliability-core` | **Built-in** reliability: artifacts, resolution, validation | Only if the document declares `etdl.reliability` |
 | `etdl-reliability` | Optional richer reliability domain + analysis | No |
 | `etdl-reliability-ontology` | Canonical reliability concepts | No |
@@ -91,21 +92,19 @@ reliability = ["dep:etdl-reliability-core"]
 default = ["reliability", "discovery", "target-java", "target-python", "target-go", "target-dotnet"]
 reliability = ["etdl-compiler/reliability", "dep:etdl-reliability-core", "dep:etdl-reliability", "etdl-conformance/reliability"]
 discovery = ["dep:etdl-failure-discovery", "dep:etdl-reliability-ontology"]
-plugins = ["etdl-compiler/plugins", "dep:ureq"]
 ```
+
+Dynamic supplement plugins (`etdl install`, sandboxed `.wasm` modules run via
+`wasmtime`) are always compiled in — not feature-gated — so `etdl install`
+works on every build, including `--no-default-features`. See
+[Supplement Plugins](../reference/supplement-plugins.md).
 
 - **Default** CLI: reliability compilation built in (the normal experience),
   `etdl discover` available, and all four language `--target`s available.
 - **`--no-default-features`**: minimal CLI — no reliability, no discovery, no
-  extra targets, no plugins.
+  extra targets. `etdl install`/`supplement list`/`remove` remain available.
 - **`--features discovery`**: add source-code failure discovery and the
   ontology crate.
-- **`--features plugins`**: dynamically load third-party supplements as
-  sandboxed `.wasm` modules (`etdl supplement install/list/remove`) —
-  **not** in `default`, unlike every feature above, because it pulls in
-  `wasmtime` (a full Cranelift JIT), a much heavier dependency than
-  anything else this binary optionally links. See
-  [Supplement Plugins](../reference/supplement-plugins.md).
 
 Requests for a capability that is not compiled in produce a clear message (for
 example `etdl discover` without the `discovery` feature) and exit non-zero.
@@ -116,6 +115,49 @@ Nothing is downloaded at runtime.
 `etdl-wasm` depends on `etdl-compiler` with its default features, so built-in
 reliability is available in the browser/Node. The built-in layer has no
 filesystem or OS dependencies, so the WASM target stays clean.
+
+### `etdl-core`
+
+```toml
+[features]
+exporter-prometheus = ["dep:metrics", "dep:metrics-exporter-prometheus"]
+exporter-loki = ["dep:tracing", "dep:tracing-subscriber", "dep:tracing-loki", "dep:url", "tokio/rt"]
+exporter-otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+live-reliability = ["dep:etdl-probability-core"]
+```
+
+Three independent, off-by-default observability exporters for
+`BranchMonitor`'s runtime observations — none required for `etdl compile` or
+for a plain generated service. See
+[Observability Exporters](../reference/observability-exporters.md) for what
+each does and how to enable it.
+
+`live-reliability` is the runtime half of the `etdl.live-reliability`
+supplement — `etdl_core::live`'s process-wide fault-tree registry,
+Beta-Binomial online estimation, and cross-service `outbound_snapshot`/
+`apply_inbound` propagation. Unlike the exporters, generated code
+*references* `etdl_core::live::*` unconditionally whenever the compiled
+document declares the supplement (see [Live Reliability](../reference/live-reliability.md)),
+so an application generating from such a document must enable this
+feature on its own `etdl-core` dependency or the generated code won't
+compile — the compiler itself has no matching feature flag, since the
+Part 4/4.5 parsing/typeck/codegen logic is unconditionally compiled in
+(no heavy dependencies to gate).
+
+### `etdl-runtime-ffi`
+
+```toml
+[features]
+exporter-prometheus = ["etdl-core/exporter-prometheus"]
+exporter-loki = ["etdl-core/exporter-loki"]
+exporter-otlp = ["etdl-core/exporter-otlp"]
+```
+
+Forwards `etdl-core`'s exporter features straight through, so the shared
+library built for a non-Rust `--target` (Java/Python/Go/.NET) can opt into
+the same exporters the Rust target does — see
+[Observability Exporters](../reference/observability-exporters.md)'s
+"Non-Rust targets" section.
 
 ## Feature matrix
 
@@ -128,10 +170,13 @@ filesystem or OS dependencies, so the WASM target stays clean.
 | C | `cargo check -p etdl-reliability` | optional reliability library |
 | D | `cargo check -p etdl-cli --no-default-features --features discovery` | ETDL + failure discovery |
 | E | `cargo check -p etdl-reliability-ontology` | ontology |
-| F | `cargo check --workspace --all-features` | everything, including `plugins` (dynamic `.wasm` supplement plugins) |
+| F | `cargo check --workspace --all-features` | everything |
 | G | `cargo check -p etdl-wasm --target wasm32-unknown-unknown` | WASM-compatible set |
 | H | `cargo check -p etdl-conformance --no-default-features` | conformance suite, lean (no reliability) |
-| I | `cargo check -p etdl-cli --no-default-features` | CLI, fully lean (no features at all) |
+| I | `cargo check -p etdl-cli --no-default-features` | CLI, minimal features (dynamic `.wasm` supplement plugins via `etdl install` still available — not feature-gated) |
+| J | `cargo check -p etdl-core --features exporter-prometheus,exporter-loki,exporter-otlp` | all three observability exporters at once |
+| K | `cargo check -p etdl-runtime-ffi --no-default-features --features exporter-prometheus,exporter-loki,exporter-otlp` | non-Rust-target C ABI with all three exporters |
+| L | `cargo check -p etdl-core --features live-reliability` | the live reliability engine on its own |
 
 ## Reproducibility
 

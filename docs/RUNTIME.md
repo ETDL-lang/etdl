@@ -25,7 +25,10 @@ other components are runtime-free and usable from sync code.
 ## 2. BranchMonitor
 
 - `new(node_id)` creates a monitor with its own `SlaTracker` and `ChaosController`.
-- `record_branch(outcome, declared_probability)`:
+- `record_branch(node_id, outcome, declared_probability)`: `node_id` is
+  explicit (not implied by `new`'s `node_id`) so one monitor reused across
+  several barriers in a handler still attributes each barrier's SLA window
+  independently.
   1. consults `ChaosController` — if chaos fires, the branch record is **dropped**
      (this is the injection mechanism; the declared probability is not recorded),
   2. records the outcome in `SlaTracker`,
