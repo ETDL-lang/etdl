@@ -1,0 +1,136 @@
+# Security Supplement demo: bypass-threshold enforcement and live
+# monitoring (Section 7 of ETDL-Security-Supplement.md). Distinct from
+# attack-tree-demo.etdl (which demonstrates STRIDE classification and
+# W-411/uncategorized-leaf coverage) — this file focuses on the Control
+# Object's *optional* `bypassOutcome`/`maxBypassProbability` fields: the
+# Control mapped onto `RateLimitBarrier` declares a bypass ceiling of
+# 0.05, verified at compile time against the barrier's own resolved
+# `FAILURE` branch probability (backed by a real Fault Tree rather than a
+# static literal, specifically so it can be live-tracked). With
+# `etdl.live-reliability` also declared, that same branch's condition is
+# `security.control_effective == false`: branch selection reacts live to
+# the control's currently-tracked bypass rate, routing to a fail-safe
+# path if it ever drifts above the declared ceiling.
+#
+# The attack tree/STRIDE classification below is deliberately minimal
+# (just enough to keep this a fully spec-conformant `etdl.security`
+# document, which normatively depends on `etdl.tree-event`) — it models
+# the same real-world event ("distributed request flood") the Fault Tree
+# separately quantifies, showing how the qualitative attack-tree view and
+# the quantitative live-monitored view describe the same control from two
+# independent, composable angles.
+
+etdl: "1.0.0"
+info:
+  title: "Order Fulfillment (Security Demo: bypass threshold)"
+  version: "1.0.0"
+  domain: "FulfillmentContext"
+
+supplements:
+  - id: etdl.security
+    version: "1.0"
+    metadata:
+      x-requires:
+        - id: etdl.tree-event
+          range: ">=1.0 <2.0"
+  - id: etdl.tree-event
+    version: "1.0"
+  - id: etdl.live-reliability
+    version: "1.0"
+
+components:
+  messages:
+    OrderPlaced:
+      name: OrderPlaced
+      payload:
+        type: object
+
+faultTrees:
+  RateLimitBypassFailure:
+    description: "Live-tracked probability that the rate limiter is bypassed."
+    topEvent:
+      id: RateLimitBypassTop
+      description: "An attacker successfully bypasses the rate limiter."
+      rootCause: DistributedRequestFlood
+    basicEvents:
+      DistributedRequestFlood:
+        description: "Requests arrive spread across enough source IPs to evade the per-IP rate limit."
+        probability: 0.01
+
+x-live-reliability:
+  faultTrees:
+    - id: RateLimitBypassFailure
+      threshold: 0.3
+      basicEvents:
+        - id: DistributedRequestFlood
+          source: local
+          priorStrength: 10
+
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent:
+      id: OrderPlacedTrigger
+      message: "#/components/messages/OrderPlaced"
+      next: RateLimitBarrier
+    nodes:
+      RateLimitBarrier:
+        type: barrier
+        description: "Branch selection is driven by whether the control's declared bypass ceiling is currently maintained live, not an ordinary payload comparison."
+        branches:
+          - outcome: FAILURE
+            condition: "security.control_effective == false"
+            probabilitySource: "#/faultTrees/RateLimitBypassFailure/topEvent"
+            next: FailSafeConsequence
+          - outcome: SUCCESS
+            condition: default
+            next: ProcessPaymentOperation
+
+      ProcessPaymentOperation:
+        type: operation
+        action: execute
+        handler: "stripe_charge_handler"
+        next: FulfillmentConsequence
+        onFailure: FailSafeConsequence
+
+      FulfillmentConsequence:
+        type: consequence
+        operation: terminate
+
+      FailSafeConsequence:
+        type: consequence
+        operation: terminate
+
+x-tree-event:
+  trees:
+    - id: "rate-limit-attack-tree"
+      version: "1"
+      root: "RateLimitBypassed"
+      description: "Ways an attacker could bypass the payment gateway's rate limiter."
+      nodes:
+        DistributedRequestFlood:
+          kind: leaf
+          description: "requests spread across many source IPs to evade per-IP limiting"
+        SlowRequestPacing:
+          kind: leaf
+          description: "requests paced just under the per-IP threshold"
+        RateLimitBypassed:
+          kind: gate
+          gate: OR
+          children: ["DistributedRequestFlood", "SlowRequestPacing"]
+
+x-security:
+  threatModels:
+    - id: rate-limit-attack-tree-classification
+      treeRef: "rate-limit-attack-tree"
+      leafCategories:
+        DistributedRequestFlood: denial-of-service
+        # SlowRequestPacing is deliberately left uncategorized here.
+
+  controls:
+    - id: gateway-rate-limiter
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RateLimitBarrier"
+      framework: "NIST-800-53"
+      controlId: "SC-5"
+      mitigates: ["DistributedRequestFlood"]
+      bypassOutcome: "FAILURE"
+      maxBypassProbability: 0.05

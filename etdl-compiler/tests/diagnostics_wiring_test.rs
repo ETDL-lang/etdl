@@ -81,6 +81,40 @@ x-diagnostics:
       monitors: "#/eventTrees/OrderFulfillment/nodes/Op"
 "##;
 
+const DOC_WITH_UNRESOLVABLE_SPAN_VALUE: &str = r##"
+etdl: "1.0.0"
+info:
+  title: "T"
+  version: "1.0.0"
+  domain: "D"
+asyncapi_imports:
+  a: "./stub.yaml"
+supplements:
+  - id: etdl.diagnostics
+    version: "1.0"
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent: { id: I, message: "a#/components/messages/m", next: Op }
+    nodes:
+      Op:
+        type: operation
+        action: execute
+        handler: "h"
+        next: C
+      C: { type: consequence, operation: terminate }
+faultTrees:
+  FT:
+    topEvent: { id: Top, description: "t", rootCause: A }
+    basicEvents:
+      A: { description: "d", probability: 0.01 }
+x-diagnostics:
+  correlations:
+    - id: c1
+      spanAttribute: "etdl.node.id"
+      spanValue: "DoesNotExist"
+      causeRef: "#/faultTrees/FT/basicEvents/A"
+"##;
+
 const DOC_WITHOUT_DIAGNOSTICS: &str = r##"
 etdl: "1.0.0"
 info:
@@ -150,6 +184,21 @@ fn warning_only_diagnostic_is_not_duplicated_by_process() {
 }
 
 #[test]
+fn unresolvable_span_value_surfaces_through_compiler_validate() {
+    let doc: EtlDocument = serde_yaml::from_str(DOC_WITH_UNRESOLVABLE_SPAN_VALUE).expect("doc parses");
+    let registry = stub_registry();
+
+    let diagnostics = Compiler::new().validate(&doc, &registry);
+
+    assert!(
+        diagnostics.iter().any(|d| d.code == "E-152"),
+        "expected E-152 (spanAttribute 'etdl.node.id' with an unresolvable spanValue) to \
+         surface through Compiler::validate, got {:?}",
+        diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn document_not_declaring_diagnostics_is_unaffected() {
     // Compatibility guarantee (spec Section 7): silently ignoring
     // `x-diagnostics` (never declared under `supplements:`) leaves the
@@ -160,7 +209,9 @@ fn document_not_declaring_diagnostics_is_unaffected() {
     let diagnostics = Compiler::new().validate(&doc, &registry);
 
     assert!(
-        !diagnostics.iter().any(|d| d.code == "E-150" || d.code == "E-151" || d.code == "W-412"),
+        !diagnostics
+            .iter()
+            .any(|d| d.code == "E-150" || d.code == "E-151" || d.code == "E-152" || d.code == "W-412"),
         "expected zero diagnostics-supplement-related diagnostics, got {:?}",
         diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
     );

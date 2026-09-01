@@ -467,6 +467,57 @@ fn check_value_expr(
                 );
             }
         }
+        ValueExpr::Path(path_expr) if is_security_root(path_expr) => {
+            // Two supplements gate this one path, not just one — a
+            // genuine dependency `reliability.in_range`/`performance.in_budget`
+            // don't have: the bypass threshold comes from etdl.security,
+            // the live value comes from etdl.live-reliability.
+            if !crate::validate::declares_supplement(ctx.doc, "etdl.security") {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-143",
+                        format!(
+                            "barrier '{}' branch {}: '{}' requires the document to declare supplement etdl.security",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if !crate::validate::declares_supplement(ctx.doc, "etdl.live-reliability") {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-143",
+                        format!(
+                            "barrier '{}' branch {}: '{}' also requires the document to declare supplement etdl.live-reliability",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if security_path_type(path_expr) == EcelType::Unknown {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-143",
+                        format!(
+                            "barrier '{}' branch {}: 'security' path must be exactly 'security.control_effective', got '{}'",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if !top_level {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-143",
+                        format!(
+                            "barrier '{}' branch {}: 'security.control_effective' must be the entire branch condition, not combined with &&/||/! — split it into its own branch",
+                            node_id, branch_idx
+                        ),
+                    )
+                    .at(key()),
+                );
+            }
+        }
         ValueExpr::Path(_) | ValueExpr::Number(_) => {}
         ValueExpr::Call(func, arg) => {
             check_value_expr(ctx, arg, tree_name, node_id, branch_idx, false, diagnostics);
@@ -606,6 +657,9 @@ fn resolve_value_expr_type(ctx: &MessageContext, expr: &ValueExpr) -> EcelType {
         ValueExpr::Path(path_expr) if is_safety_root(path_expr) => {
             safety_path_type(path_expr)
         }
+        ValueExpr::Path(path_expr) if is_security_root(path_expr) => {
+            security_path_type(path_expr)
+        }
         ValueExpr::Path(path_expr) => {
             let segments: Vec<&PathSegment> = path_expr.segments.iter().skip(1).collect();
 
@@ -698,6 +752,26 @@ fn is_safety_root(path_expr: &PathExpr) -> bool {
 fn safety_path_type(path_expr: &PathExpr) -> EcelType {
     match path_expr.segments.as_slice() {
         [PathSegment::Field(_root), PathSegment::Field(name)] if name == "sil_maintained" => {
+            EcelType::Bool
+        }
+        _ => EcelType::Unknown,
+    }
+}
+
+/// Whether `path_expr` is rooted at the `security` keyword (the Security
+/// Supplement's `security.control_effective`, see `docs/reference/
+/// security-supplement.md`) rather than the ordinary `message` root.
+fn is_security_root(path_expr: &PathExpr) -> bool {
+    matches!(path_expr.segments.first(), Some(PathSegment::Field(s)) if s == "security")
+}
+
+/// `security.control_effective` (exactly two segments, the second
+/// literally `control_effective`) types as `Bool`; anything else under
+/// the `security` root is `Unknown` here — mirrors `safety_path_type`
+/// exactly.
+fn security_path_type(path_expr: &PathExpr) -> EcelType {
+    match path_expr.segments.as_slice() {
+        [PathSegment::Field(_root), PathSegment::Field(name)] if name == "control_effective" => {
             EcelType::Bool
         }
         _ => EcelType::Unknown,
@@ -1091,6 +1165,98 @@ eventTrees:
         );
         let diagnostics = type_check(&doc);
         assert!(!diagnostics.iter().any(|d| d.code == "E-135"), "got {diagnostics:?}");
+        assert!(diagnostics.iter().any(|d| d.code == "V-204"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn security_control_effective_without_either_supplement_is_e143() {
+        let doc = doc_with_condition_and_supplements("\"security.control_effective == true\"", &[]);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-143"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn security_control_effective_with_only_security_declared_is_e143() {
+        // The two-supplement gate `security.control_effective` alone has:
+        // `etdl.security` isn't enough on its own, unlike every other ECEL
+        // path in this codebase (except `safety.sil_maintained`), each
+        // gated on exactly one supplement.
+        let doc = doc_with_condition_and_supplements(
+            "\"security.control_effective == true\"",
+            &["etdl.security"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-143"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn security_control_effective_with_only_live_reliability_declared_is_e143() {
+        let doc = doc_with_condition_and_supplements(
+            "\"security.control_effective == true\"",
+            &["etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-143"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn security_control_effective_with_both_supplements_declared_has_no_diagnostics() {
+        let doc = doc_with_condition_and_supplements(
+            "\"security.control_effective == true\"",
+            &["etdl.security", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+    }
+
+    #[test]
+    fn security_wrong_shape_is_e143_even_with_both_supplements_declared() {
+        let doc = doc_with_condition_and_supplements(
+            "\"security.something_else == true\"",
+            &["etdl.security", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-143"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn security_control_effective_combined_with_and_is_e143() {
+        let doc = doc_with_condition_and_supplements(
+            "\"security.control_effective == true && message.payload.qty > 0\"",
+            &["etdl.security", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "E-143" && d.message.contains("entire branch condition")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn security_control_effective_negated_is_e143() {
+        let doc = doc_with_condition_and_supplements(
+            "\"!(security.control_effective == true)\"",
+            &["etdl.security", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "E-143" && d.message.contains("entire branch condition")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn security_control_effective_compared_against_a_number_is_v204() {
+        let doc = doc_with_condition_and_supplements(
+            "\"security.control_effective == 1\"",
+            &["etdl.security", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(!diagnostics.iter().any(|d| d.code == "E-143"), "got {diagnostics:?}");
         assert!(diagnostics.iter().any(|d| d.code == "V-204"), "got {diagnostics:?}");
     }
 }

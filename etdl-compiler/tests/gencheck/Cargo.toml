@@ -50,6 +50,14 @@ gen-check-performance = []
 # SIL band — not just that it compiles. See
 # docs/reference/safety-supplement.md.
 gen-check-safety = ["etdl-core/live-reliability"]
+# Runs the security-check fixture's generated handler, driving
+# `etdl_core::live::record_observation` directly (same mechanism
+# `gen-check-safety` uses) to prove security.control_effective-driven
+# branch selection actually flips to the fail-safe path once the linked
+# fault tree's live probability drifts above the control's declared
+# bypass ceiling — not just that it compiles. See
+# docs/reference/security-supplement.md.
+gen-check-security = ["etdl-core/live-reliability"]
 
 [dependencies]
 etdl-core = { path = "../../../etdl-core" }

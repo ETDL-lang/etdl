@@ -45,19 +45,38 @@ pub fn attach_node_span_attribute(node_id: &str) {
     eprintln!("[etdl.telemetry] span attribute etdl.node.id={}", node_id);
 }
 
+/// A Diagnostics Supplement (`etdl.diagnostics`) Correlation to surface
+/// alongside an SLA anomaly, when the anomalous node/key matches a
+/// declared Correlation's `spanValue` for `spanAttribute ==
+/// "etdl.node.id"` (the only attribute `attach_node_span_attribute` ever
+/// emits). Populated by generated code from compile-time-resolved
+/// `x-diagnostics.correlations` data — this module never looks anything
+/// up itself. Stays exactly as stub-like as `emit_anomaly_event` itself:
+/// carries strings through the same `eprintln!`-based mechanism, no new
+/// tracing/span infrastructure.
+pub struct CorrelatedCause<'a> {
+    pub cause_ref: &'a str,
+    pub description: Option<&'a str>,
+}
+
 pub fn emit_anomaly_event(
     node_id: &str,
     outcome: &str,
     declared_probability: f64,
     observed_frequency: f64,
+    cause: Option<CorrelatedCause>,
 ) {
+    let cause_suffix = cause
+        .map(|c| format!(" cause_ref={} description={}", c.cause_ref, c.description.unwrap_or("-")))
+        .unwrap_or_default();
     eprintln!(
-        "[etdl.telemetry] SLA ANOMALY | node={} outcome={} declared={:.6} observed={:.6} deviation={:.6}",
+        "[etdl.telemetry] SLA ANOMALY | node={} outcome={} declared={:.6} observed={:.6} deviation={:.6}{}",
         node_id,
         outcome,
         declared_probability,
         observed_frequency,
-        (observed_frequency - declared_probability).abs()
+        (observed_frequency - declared_probability).abs(),
+        cause_suffix
     );
 }
 

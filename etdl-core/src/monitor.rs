@@ -129,6 +129,40 @@ impl BranchMonitor {
     /// `record_branch` previously did not — see the regression test
     /// `two_barriers_sharing_one_monitor_get_independent_sla_windows`.
     pub fn record_branch(&mut self, node_id: &str, outcome: &str, declared_probability: f64) {
+        self.record_branch_impl(node_id, outcome, declared_probability, None);
+    }
+
+    /// Same as [`record_branch`](Self::record_branch), but — when an
+    /// anomaly is detected — surfaces the given Diagnostics Supplement
+    /// Correlation's cause alongside it. Generated code calls this instead
+    /// of `record_branch` only for a node id some Correlation's
+    /// `spanValue` names (`spanAttribute == "etdl.node.id"`) — every other
+    /// call site, and every document that doesn't declare
+    /// `etdl.diagnostics`, keeps calling `record_branch` unchanged,
+    /// producing byte-identical generated code.
+    pub fn record_branch_with_cause(
+        &mut self,
+        node_id: &str,
+        outcome: &str,
+        declared_probability: f64,
+        cause_ref: &str,
+        description: Option<&str>,
+    ) {
+        self.record_branch_impl(
+            node_id,
+            outcome,
+            declared_probability,
+            Some(crate::telemetry::CorrelatedCause { cause_ref, description }),
+        );
+    }
+
+    fn record_branch_impl(
+        &mut self,
+        node_id: &str,
+        outcome: &str,
+        declared_probability: f64,
+        cause: Option<crate::telemetry::CorrelatedCause>,
+    ) {
         let should_chaos = {
             let mut chaos = self.chaos.lock().unwrap();
             chaos.should_inject_chaos(node_id)
@@ -146,6 +180,7 @@ impl BranchMonitor {
                 outcome,
                 declared_probability,
                 sla.observed_frequency(node_id, outcome),
+                cause,
             );
             #[cfg(feature = "exporter-prometheus")]
             crate::exporters::prometheus::record_anomaly(node_id, outcome);
@@ -181,6 +216,36 @@ impl BranchMonitor {
         error: &dyn std::error::Error,
         declared_probability: Option<f64>,
     ) {
+        self.record_failure_impl(operation_id, error, declared_probability, None);
+    }
+
+    /// Same as [`record_failure`](Self::record_failure), but surfaces the
+    /// given Correlation's cause alongside a detected anomaly — see
+    /// [`record_branch_with_cause`](Self::record_branch_with_cause)'s doc
+    /// comment for the calling convention.
+    pub fn record_failure_with_cause(
+        &mut self,
+        operation_id: &str,
+        error: &dyn std::error::Error,
+        declared_probability: Option<f64>,
+        cause_ref: &str,
+        description: Option<&str>,
+    ) {
+        self.record_failure_impl(
+            operation_id,
+            error,
+            declared_probability,
+            Some(crate::telemetry::CorrelatedCause { cause_ref, description }),
+        );
+    }
+
+    fn record_failure_impl(
+        &mut self,
+        operation_id: &str,
+        error: &dyn std::error::Error,
+        declared_probability: Option<f64>,
+        cause: Option<crate::telemetry::CorrelatedCause>,
+    ) {
         let key = format!("{}.failure", operation_id);
         let outcome = "FAILURE";
 
@@ -194,6 +259,7 @@ impl BranchMonitor {
                     outcome,
                     prob,
                     sla.observed_frequency(&key, outcome),
+                    cause,
                 );
                 #[cfg(feature = "exporter-prometheus")]
                 crate::exporters::prometheus::record_anomaly(&key, outcome);
@@ -234,6 +300,33 @@ impl BranchMonitor {
     /// declared and resolves) — see `codegen/rust.rs`'s `Ok(_result) =>`
     /// arm.
     pub fn record_success(&mut self, operation_id: &str, declared_probability: Option<f64>) {
+        self.record_success_impl(operation_id, declared_probability, None);
+    }
+
+    /// Same as [`record_success`](Self::record_success), but surfaces the
+    /// given Correlation's cause alongside a detected anomaly — see
+    /// [`record_branch_with_cause`](Self::record_branch_with_cause)'s doc
+    /// comment for the calling convention.
+    pub fn record_success_with_cause(
+        &mut self,
+        operation_id: &str,
+        declared_probability: Option<f64>,
+        cause_ref: &str,
+        description: Option<&str>,
+    ) {
+        self.record_success_impl(
+            operation_id,
+            declared_probability,
+            Some(crate::telemetry::CorrelatedCause { cause_ref, description }),
+        );
+    }
+
+    fn record_success_impl(
+        &mut self,
+        operation_id: &str,
+        declared_probability: Option<f64>,
+        cause: Option<crate::telemetry::CorrelatedCause>,
+    ) {
         let key = format!("{}.failure", operation_id);
         let outcome = "FAILURE";
 
@@ -247,6 +340,7 @@ impl BranchMonitor {
                     outcome,
                     prob,
                     sla.observed_frequency(&key, outcome),
+                    cause,
                 );
                 #[cfg(feature = "exporter-prometheus")]
                 crate::exporters::prometheus::record_anomaly(&key, outcome);

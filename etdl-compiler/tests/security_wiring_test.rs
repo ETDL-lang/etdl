@@ -99,6 +99,76 @@ x-security:
       mitigates: ["ApiKeyLeak"]
 "##;
 
+// A fault-tree-backed FAILURE branch whose resolved probability (0.05)
+// exceeds the declared maxBypassProbability (0.001) —
+// `validate_control_thresholds` needs *resolved* fault-tree probabilities,
+// which only exist after `Compiler::validate_with_base`'s own pipeline
+// runs `fault_tree::resolve_fault_trees_with_overrides` — this is the
+// proof that actually happens, not something a unit test calling
+// `parse_and_validate_security`/`validate_control_thresholds` directly (as
+// `security.rs`'s own tests do) could ever catch.
+const DOC_WITH_BYPASS_THRESHOLD_MISMATCH: &str = r##"
+etdl: "1.0.0"
+info:
+  title: "T"
+  version: "1.0.0"
+  domain: "D"
+asyncapi_imports:
+  a: "./stub.yaml"
+supplements:
+  - id: etdl.security
+    version: "1.0"
+  - id: etdl.tree-event
+    version: "1.0"
+faultTrees:
+  RateLimitBypass:
+    topEvent: { id: Top, description: "d", rootCause: BE }
+    basicEvents:
+      BE: { description: "d", probability: 0.05 }
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent: { id: I, message: "a#/components/messages/m", next: RateLimitBarrier }
+    nodes:
+      RateLimitBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.95
+            next: C
+          - outcome: FAILURE
+            condition: default
+            probabilitySource: "#/faultTrees/RateLimitBypass/topEvent"
+            next: C
+      C: { type: consequence, operation: terminate }
+x-tree-event:
+  trees:
+    - id: "rate-limit-attack-tree"
+      version: "1"
+      root: "Bypassed"
+      nodes:
+        RateLimitBypassLeaf:
+          kind: leaf
+        OtherLeaf:
+          kind: leaf
+        Bypassed:
+          kind: gate
+          gate: OR
+          children: ["RateLimitBypassLeaf", "OtherLeaf"]
+x-security:
+  threatModels:
+    - id: tm1
+      treeRef: "rate-limit-attack-tree"
+      leafCategories: {}
+  controls:
+    - id: c1
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RateLimitBarrier"
+      controlId: "SC-5"
+      mitigates: ["RateLimitBypassLeaf"]
+      bypassOutcome: FAILURE
+      maxBypassProbability: 0.001
+"##;
+
 const DOC_WITHOUT_SECURITY: &str = r##"
 etdl: "1.0.0"
 info:
@@ -186,6 +256,23 @@ fn warning_only_diagnostic_is_not_duplicated_by_process() {
 }
 
 #[test]
+fn bypass_threshold_mismatch_surfaces_through_compiler_validate_not_just_compile() {
+    let doc: EtlDocument = serde_yaml::from_str(DOC_WITH_BYPASS_THRESHOLD_MISMATCH).expect("doc parses");
+    let registry = stub_registry();
+
+    let diagnostics = Compiler::new().validate(&doc, &registry);
+
+    assert!(
+        diagnostics.iter().any(|d| d.code == "E-142"),
+        "expected E-142 (maxBypassProbability 0.001 declared, resolved probability 0.05 far \
+         exceeds it) to surface through Compiler::validate itself — \
+         validate_control_thresholds is called from validate_with_base specifically so etdl \
+         validate (not only etdl compile) catches this before any code exists, got {:?}",
+        diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn document_not_declaring_security_is_unaffected() {
     // Compatibility guarantee (spec Section 7): silently ignoring
     // `x-security` (never declared under `supplements:`) leaves the
@@ -196,7 +283,9 @@ fn document_not_declaring_security_is_unaffected() {
     let diagnostics = Compiler::new().validate(&doc, &registry);
 
     assert!(
-        !diagnostics.iter().any(|d| d.code == "E-140" || d.code == "E-141" || d.code == "W-411"),
+        !diagnostics.iter().any(|d| {
+            matches!(d.code.as_str(), "E-140" | "E-141" | "E-142" | "E-143" | "W-411" | "W-416")
+        }),
         "expected zero security-related diagnostics, got {:?}",
         diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
     );

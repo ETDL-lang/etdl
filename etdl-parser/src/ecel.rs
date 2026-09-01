@@ -325,21 +325,22 @@ fn parse_path_expr(input: &str) -> IResult<&str, PathExpr> {
 }
 
 /// `message` is the ordinary root every path expression has always used.
-/// `reliability`, `performance`, and `safety` are narrower roots three
-/// optional, off-by-default supplements each reserve — grammar-wise all
-/// three parse like any other path (`reliability.in_range`,
-/// `performance.in_budget`, `safety.sil_maintained`, generic dotted
-/// chains), but only their one specific exact shape is meaningful;
-/// anything else under any of them is a type error reported by
-/// `etdl-compiler::typeck`, not a parse error, matching how this codebase
-/// already prefers "structure via grammar, rules via explicit checks" over
-/// rejecting shapes at parse time.
+/// `reliability`, `performance`, `safety`, and `security` are narrower
+/// roots four optional, off-by-default supplements each reserve —
+/// grammar-wise all four parse like any other path (`reliability.in_range`,
+/// `performance.in_budget`, `safety.sil_maintained`,
+/// `security.control_effective`, generic dotted chains), but only their
+/// one specific exact shape is meaningful; anything else under any of them
+/// is a type error reported by `etdl-compiler::typeck`, not a parse error,
+/// matching how this codebase already prefers "structure via grammar,
+/// rules via explicit checks" over rejecting shapes at parse time.
 fn parse_root_var(input: &str) -> IResult<&str, String> {
     alt((
         value("message".to_string(), tag("message")),
         value("reliability".to_string(), tag("reliability")),
         value("performance".to_string(), tag("performance")),
         value("safety".to_string(), tag("safety")),
+        value("security".to_string(), tag("security")),
     ))(input)
 }
 
@@ -598,6 +599,34 @@ mod tests {
                         assert_eq!(p.segments.len(), 2);
                         assert_eq!(p.segments[0], PathSegment::Field("safety".to_string()));
                         assert_eq!(p.segments[1], PathSegment::Field("sil_maintained".to_string()));
+                    }
+                    _ => panic!("expected path"),
+                }
+                match &c.right {
+                    Operand::Literal(Literal::Bool(b)) => assert!(*b),
+                    _ => panic!("expected bool literal"),
+                }
+            }
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn test_security_root_parses_like_any_other_path() {
+        // Grammar-level only, mirroring `test_safety_root_parses_like_any_other_path`:
+        // `security.control_effective` (the Security Supplement's own
+        // bypass-live-check ECEL path) parses generically, no special
+        // grammar case — see `parse_root_var`'s doc comment.
+        let cond = parse_condition("security.control_effective == true").unwrap();
+        match cond {
+            Condition::Expr(expr) => {
+                let c = as_comparison(&expr);
+                assert_eq!(c.op, Comparator::Eq);
+                match &c.left {
+                    Operand::Value(ValueExpr::Path(p)) => {
+                        assert_eq!(p.segments.len(), 2);
+                        assert_eq!(p.segments[0], PathSegment::Field("security".to_string()));
+                        assert_eq!(p.segments[1], PathSegment::Field("control_effective".to_string()));
                     }
                     _ => panic!("expected path"),
                 }

@@ -9,11 +9,16 @@ spec itself is authoritative if the two ever disagree.
 
 ## 1. Purpose (INFORMATIVE)
 
-Structural metadata only: declares which runtime telemetry attribute a
-document's author expects to correlate with which Fault-Tree cause, for a
-human or an external tool doing post-incident triage to consult. Defines no
-new runtime behavior, adds no obligation to the reference `etdl_core`
-runtime, and performs no automated root-cause inference.
+Declares which runtime telemetry attribute a document's author expects to
+correlate with which Fault-Tree cause, for a human or an external tool
+doing post-incident triage to consult. A Correlation is always
+author-declared, never computed — this supplement still performs no
+automated root-cause inference or anomaly detection of its own
+(`etdl_core::sla::SlaTracker` already decides *whether* something is
+anomalous, unchanged). Unlike earlier revisions, generated code now MAY
+*surface* an already-declared Correlation alongside an SLA anomaly it
+independently detects at a matching node (§6.1) — presentation of
+declared metadata at a moment decided elsewhere, not new inference.
 
 ## 2. Scope (NORMATIVE)
 
@@ -25,15 +30,21 @@ This supplement defines:
   parser change was made or is required**).
 - Reference resolution: a Correlation's `causeRef` must resolve to a Gate
   or Basic Event in a declared Fault Tree; an Anomaly Rule's `monitors`
-  must resolve to a node of **any** kind.
+  must resolve to a node of **any** kind; a Correlation's `spanValue`
+  must resolve to a real node id when its `spanAttribute` is exactly
+  `"etdl.node.id"` (§5).
+- How generated code surfaces an already-declared Correlation alongside a
+  detected anomaly (§6.1, INFORMATIVE — no new ECEL path).
 
 This supplement does **not** define:
 
 - Any automated correlation, root-cause inference, anomaly detection, or
   telemetry ingestion. It is a static, author-declared lookup table; whether
   a Correlation's claim is empirically accurate is not answered here.
-- Any change to the reference runtime's telemetry behavior — declaring
-  `x-diagnostics` requires no change to `etdl_core`.
+- Any new detection mechanism, or ECEL path — `SlaTracker`'s per-call
+  lifetime and the reference runtime's `eprintln!`-based telemetry stubs
+  are unchanged; §6.1 only threads one additional optional argument
+  through an already-existing call.
 
 ## 3. Terminology (NORMATIVE)
 
@@ -78,6 +89,14 @@ Barrier-only `nodeRef` restrictions. Both use the same manual-parse style
 (`performance::resolve_node_ref`/`safety`'s equivalents); no generic
 JSON-Pointer resolver exists in this codebase for same-document references.
 
+Unlike earlier revisions, a Correlation's `spanValue` is *also* checked
+(`node_id_exists_anywhere`, document-wide — not scoped to one tree) when
+its `spanAttribute` is exactly `"etdl.node.id"`, the only attribute the
+reference runtime's `etdl_core::telemetry::attach_node_span_attribute`
+ever emits — `E-152` otherwise. Any other `spanAttribute` value is left
+unchecked (both fields are free-form per §4.1; this specification does
+not own or interpret third-party telemetry attribute names).
+
 ## 6. Compiler integration (NORMATIVE)
 
 Implemented entirely in `etdl-compiler::diagnostics` — a plain module, no
@@ -96,6 +115,27 @@ colocated with `parse_and_validate_diagnostics` in this same module, which
 `etdl capabilities`/`etdl supplement list` read generically — see
 [Performance](performance-supplement.md#7-compiler-integration-normative)
 for the full mechanism.
+
+### 6.1 Surfacing a correlation alongside a detected anomaly (INFORMATIVE)
+
+Codegen (`etdl-compiler::codegen::rust`) reads `diagnostics::DiagnosticsData`
+(parsed once per `generate_all` call, `CodegenCtx.diagnostics`, mirroring
+`CodegenCtx.safety`/`CodegenCtx.security`). For a node whose id matches
+some Correlation's `spanValue` (`spanAttribute == "etdl.node.id"`,
+`diagnostics_correlation_for`), generated code calls
+`etdl_core::monitor::BranchMonitor::record_branch_with_cause`,
+`record_failure_with_cause`, or `record_success_with_cause` instead of
+the plain `record_branch`/`record_failure`/`record_success` — passing the
+matched Correlation's `causeRef`/`description` as extra arguments. Those
+methods are otherwise identical to their plain counterparts; the only
+difference is that `etdl_core::telemetry::emit_anomaly_event` receives an
+extra `Some(CorrelatedCause { .. })` argument when an anomaly is
+detected, appending `cause_ref=... description=...` to its (still
+`eprintln!`-based) output. A node with no matching Correlation, or a
+document that doesn't declare `etdl.diagnostics` at all, keeps generating
+the plain calls — byte-identical to before this feature existed. "First
+match wins" if more than one Correlation targets the same node id; this
+module doesn't otherwise forbid that overlap.
 
 ## 7. `x-diagnostics` example (INFORMATIVE)
 
@@ -132,7 +172,10 @@ problem in one pass:
    `E-151` (this one *is* explicit in the spec's diagnostic table, unlike
    Performance's/Safety's own duplicate-id gap).
 4. An unresolvable `causeRef`/`monitors` (§5) is `E-150`.
-5. **W-412**: an Anomaly Rule's `monitors` node is an Operation, and either
+5. A Correlation's `spanAttribute` exactly `"etdl.node.id"` with a
+   `spanValue` not naming a real node anywhere in the document (§5) is
+   `E-152`.
+6. **W-412**: an Anomaly Rule's `monitors` node is an Operation, and either
    it has no `onFailureProbabilitySource` at all, or it does but no
    declared Correlation's `causeRef` targets the *same* Fault Tree that
    source points into. `monitors` resolving to a Barrier or Consequence is
@@ -163,7 +206,8 @@ validation, code generation, or runtime telemetry behavior.
 |---|---|
 | `E-150` | A Correlation's `causeRef`, or an Anomaly Rule's `monitors`, does not resolve; or `correlations`/`anomalyRules` failed to deserialize |
 | `E-151` | Two Correlation Objects, or two Anomaly Rule Objects, declare the same `id` (within their own collection) |
-| `W-412` | A monitored Operation has no correlated cause on record (§8, rule 5) |
+| `E-152` | A Correlation's `spanAttribute` is exactly `"etdl.node.id"` but `spanValue` does not name a real node anywhere in the document |
+| `W-412` | A monitored Operation has no correlated cause on record (§8, rule 6) |
 
 ## 21. CLI (INFORMATIVE)
 

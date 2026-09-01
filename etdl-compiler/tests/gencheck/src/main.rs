@@ -184,6 +184,52 @@ async fn main() {
         println!("gencheck safety ran");
     }
 
+    // Proves the security-check fixture's generated code actually behaves
+    // live, not just compiles: same mechanism as `gen-check-safety` above,
+    // but this fixture's branch condition is `security.control_effective`,
+    // not `safety.sil_maintained` — a genuinely different codegen path
+    // (`try_render_security_condition`) checking a single declared
+    // ceiling (the control's `maxBypassProbability`), not a band — see
+    // docs/reference/security-supplement.md.
+    #[cfg(feature = "gen-check-security")]
+    {
+        let publisher = ChannelCapturingPublisher::new();
+
+        // Freshly registered: current value == baseline == the declared
+        // prior (0.005), under the fixture's 0.02 maxBypassProbability
+        // ceiling.
+        let msg = Trigger {
+            payload: serde_json::json!({}),
+            headers: None,
+        };
+        handle_security_trigger(msg, &publisher).await.unwrap();
+        assert!(
+            publisher.published_to("normal-channel"),
+            "expected the SUCCESS branch (control effective) on a fresh baseline"
+        );
+        assert!(!publisher.published_to("failsafe-channel"));
+
+        // Drive the basic event's live estimate above the 0.02 ceiling —
+        // 200 "occurred" observations pull it from a 0.005 prior toward
+        // 1.0, well past it.
+        for _ in 0..200 {
+            etdl_core::live::record_observation("GatewayBypass", "RateLimitBypassed", true);
+        }
+
+        let msg2 = Trigger {
+            payload: serde_json::json!({}),
+            headers: None,
+        };
+        handle_security_trigger(msg2, &publisher).await.unwrap();
+        assert!(
+            publisher.published_to("failsafe-channel"),
+            "expected the FAILURE (fail-safe) branch once the live probability drifted \
+             above the declared bypass ceiling"
+        );
+
+        println!("gencheck security ran");
+    }
+
     // Two-service cross-process proof (see live-reliability-producer.etdl /
     // live-reliability-consumer.etdl and Cargo.toml's feature comments):
     // this process plays exactly one role, decided at compile time by which

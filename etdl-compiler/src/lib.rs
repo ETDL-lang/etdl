@@ -243,6 +243,12 @@ impl Compiler {
         // `etdl compile`) catches a SIL/PFD mismatch.
         safety::validate_sil_constraints(doc, &fault_tree_probs, &mut diagnostics);
 
+        // The one place `etdl.security` needs a direct call rather than
+        // the generic extension path — see
+        // `security::validate_control_thresholds`'s own doc comment for
+        // why. Same placement/reasoning as the safety call above.
+        security::validate_control_thresholds(doc, &fault_tree_probs, &mut diagnostics);
+
         typeck::type_check_conditions(doc, asyncapi_registry, &mut diagnostics);
 
         diagnostics

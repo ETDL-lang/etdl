@@ -1,0 +1,103 @@
+etdl: "1.0.0"
+info:
+  title: "Security Supplement end-to-end check"
+  version: "1.0.0"
+  domain: "Test"
+  description: "Exercises etdl.security's runtime teeth: a Control whose barrier's branch selection is driven by security.control_effective against a fault tree's live-tracked top event, mirroring safety-check.etdl's own RiskBarrier pattern but through the security.* ECEL path (which additionally requires etdl.live-reliability declared). No asyncapi_imports — inline components.messages, matching safety-check.etdl's pattern. The minimal attack tree/threatModel below exist only because a Control's `mitigates` field is required and non-empty, validated against a real declared leaf — not because this fixture is about STRIDE classification."
+
+supplements:
+  - id: etdl.security
+    version: "1.0"
+  - id: etdl.tree-event
+    version: "1.0"
+  - id: etdl.live-reliability
+    version: "1.0"
+
+components:
+  messages:
+    Trigger:
+      name: Trigger
+      payload:
+        type: object
+
+faultTrees:
+  GatewayBypass:
+    description: "A single basic event, live-tracked."
+    topEvent:
+      id: GatewayBypassTop
+      description: "The rate-limiting control is bypassed."
+      rootCause: RateLimitBypassed
+    basicEvents:
+      RateLimitBypassed:
+        description: "An attacker bypasses the rate limiter."
+        probability: 0.005
+
+x-live-reliability:
+  faultTrees:
+    - id: GatewayBypass
+      threshold: 0.3
+      basicEvents:
+        - id: RateLimitBypassed
+          source: local
+          priorStrength: 10
+
+x-tree-event:
+  trees:
+    - id: "rate-limit-attack-tree"
+      version: "1"
+      root: "Bypassed"
+      nodes:
+        RateLimitBypassLeaf:
+          kind: leaf
+        OtherLeaf:
+          kind: leaf
+        Bypassed:
+          kind: gate
+          gate: OR
+          children: ["RateLimitBypassLeaf", "OtherLeaf"]
+
+x-security:
+  threatModels:
+    - id: tm1
+      treeRef: "rate-limit-attack-tree"
+      leafCategories:
+        RateLimitBypassLeaf: denial-of-service
+  controls:
+    - id: risk-control
+      nodeRef: "#/eventTrees/SecurityCheck/nodes/RiskBarrier"
+      controlId: "SC-5"
+      mitigates: ["RateLimitBypassLeaf"]
+      bypassOutcome: FAILURE
+      maxBypassProbability: 0.02
+
+eventTrees:
+  SecurityCheck:
+    initiatingEvent:
+      id: SecurityTrigger
+      message: "#/components/messages/Trigger"
+      next: RiskBarrier
+
+    nodes:
+      RiskBarrier:
+        type: barrier
+        description: "Branch selection is driven by whether the declared bypass ceiling is currently maintained live, not an ordinary payload comparison."
+        branches:
+          - outcome: FAILURE
+            condition: "security.control_effective == false"
+            probabilitySource: "#/faultTrees/GatewayBypass/topEvent"
+            next: FailSafeConsequence
+          - outcome: SUCCESS
+            condition: "default"
+            next: NormalConsequence
+
+      NormalConsequence:
+        type: consequence
+        operation: send
+        channel: "normal-channel"
+        message: "#/components/messages/Trigger"
+
+      FailSafeConsequence:
+        type: consequence
+        operation: send
+        channel: "failsafe-channel"
+        message: "#/components/messages/Trigger"

@@ -83,17 +83,23 @@ MAJOR version; new codes are added, never reused.
 | W-406 | house event declares a probability/failureRate (boundary condition) |
 | W-001 | duplicate id under `nodes`/`gates`/`basicEvents` (via span detection) |
 
-## Security Supplement (E-14x / W-411)
+## Security Supplement (E-14x / W-411 / W-416)
 
 `etdl.security` (`docs/reference/security-supplement.md`) diagnostics, only
 produced when a document declares `supplements: [{id: etdl.security, ...}]`
-(and depends on `etdl.tree-event` also being declared — see that doc's §5):
+(and depends on `etdl.tree-event` also being declared — see that doc's §5).
+Like Safety, a Control's declared `maxBypassProbability` is **verified
+against the document's own resolved numbers**, not just checked for
+self-consistency — see that doc's §7.
 
 | Code | Condition | Suggestion |
 |---|---|---|
 | E-140 | a Threat Model's `leafCategories` value isn't a STRIDE category, `treeRef` doesn't resolve, `threatModels` failed to deserialize, or a duplicate Threat Model id was declared | fix the value / reference / id |
-| E-141 | a `leafCategories` key or `mitigates` entry isn't a leaf of the relevant tree, a Control's `nodeRef` doesn't resolve to a Barrier, `mitigates` is empty, `controls` failed to deserialize, or a duplicate Control id was declared | fix the reference / value / id |
+| E-141 | a `leafCategories` key or `mitigates` entry isn't a leaf of the relevant tree, a Control's `nodeRef` doesn't resolve to a Barrier, `mitigates` is empty, exactly one of `bypassOutcome`/`maxBypassProbability` is declared, a `bypassOutcome` doesn't match a branch outcome, `controls` failed to deserialize, or a duplicate Control id was declared | fix the reference / value / id |
+| E-142 | a Control's `bypassOutcome` branch resolves to a probability exceeding its declared `maxBypassProbability` | raise the ceiling, or fix whatever is driving that probability |
+| E-143 | a branch condition uses the `security.*` ECEL path root without the document declaring `etdl.security`, without also declaring `etdl.live-reliability`, or the path isn't exactly `security.control_effective` | declare both supplements, or fix the path/shape |
 | W-411 | a `mitigates` entry is a genuine leaf but no declared Threat Model categorizes it | add a `leafCategories` entry, or accept it's uncategorized |
+| W-416 | a Threat Model categorizes a leaf that zero declared Controls' `mitigates` targets | add a mitigating Control, or accept the gap |
 
 ## Diagnostics Supplement (E-15x / W-412)
 
@@ -105,6 +111,7 @@ only produced when a document declares `supplements: [{id: etdl.diagnostics,
 |---|---|---|
 | E-150 | a Correlation's `causeRef`, or an Anomaly Rule's `monitors`, doesn't resolve; or `correlations`/`anomalyRules` failed to deserialize | fix the reference |
 | E-151 | two Correlations, or two Anomaly Rules, declare the same id | rename one |
+| E-152 | a Correlation's `spanAttribute` is exactly `"etdl.node.id"` but `spanValue` doesn't name a real node anywhere in the document | fix `spanValue`, or a different `spanAttribute` |
 | W-412 | a monitored Operation has no correlated cause on record | declare a Correlation targeting the Operation's Fault Tree, or accept the gap |
 
 ## Safety Supplement (E-13x / W-410)

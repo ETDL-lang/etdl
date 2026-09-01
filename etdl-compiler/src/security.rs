@@ -21,12 +21,31 @@
 //! "each supplement independently re-derives its own inputs" shape
 //! `validate()`/`process()` already use within a single supplement).
 //!
-//! Registered like [`crate::performance::PerformanceExtension`] — no
-//! bespoke direct call anywhere in `Compiler`'s pipeline (`lib.rs`). See
-//! `docs/reference/security-supplement.md`.
+//! Registered like [`crate::performance::PerformanceExtension`] for the
+//! *structural* parts of this module — no bespoke direct call anywhere in
+//! `Compiler`'s pipeline for those. [`validate_control_thresholds`] is the
+//! **one exception**: it needs *resolved* fault-tree probabilities, which
+//! `EtdlExtension::validate`'s generic signature has no way to receive, so
+//! it's called directly from `Compiler::validate_with_base` (`lib.rs`),
+//! the same kind of legitimate exception `safety::validate_sil_constraints`
+//! already is, for the same reason. See `docs/reference/security-supplement.md`.
+//!
+//! Unlike earlier revisions, a Control's declared `bypassOutcome` +
+//! `maxBypassProbability` (both OPTIONAL — a wholly new, additive
+//! capability, not a retrofit of an existing mandatory field) is now
+//! verified against that branch's actual resolved probability
+//! ([`validate_control_thresholds`]), and a Control can validate its
+//! bypass rate live via the ECEL path `security.control_effective` (see
+//! `codegen/rust.rs`'s `try_render_security_condition`) when the document
+//! also declares `etdl.live-reliability`.
 //!
 //! ## Interpretations beyond the literal diagnostic table
 //!
+//! - A Control declaring exactly one of `bypassOutcome`/
+//!   `maxBypassProbability` (not both, not neither), or a `bypassOutcome`
+//!   that doesn't match any of its Barrier's own branch outcomes, is
+//!   folded into the existing **E-141** bucket — the same interpretation
+//!   Safety used for its own analogous `failureOutcome` mismatch.
 //! - **The `etdl.tree-event` dependency (spec Section 1's `x-requires`
 //!   metadata) is not separately parsed or enforced by this module.**
 //!   No generic supplement-dependency-declaration mechanism exists
@@ -100,6 +119,22 @@ pub struct Control {
     pub control_id: String,
     #[serde(default)]
     pub mitigates: Vec<String>,
+    /// Must equal one of `node_ref`'s own Barrier node's `branches[].outcome`
+    /// values — identifies which branch's resolved probability is this
+    /// control's probability of being bypassed (Section 6.1's threshold
+    /// check, Section 6.2's `security.control_effective`). OPTIONAL: unlike
+    /// Safety's `failureOutcome`, this is a wholly new capability being
+    /// added to an already-shipped object, not a retrofit of an existing
+    /// mandatory field — declaring it (together with `maxBypassProbability`)
+    /// opts a Control into verification and the ECEL path; omitting it
+    /// leaves the Control exactly as declarative as before.
+    #[serde(default, rename = "bypassOutcome")]
+    pub bypass_outcome: Option<String>,
+    /// The declared acceptable ceiling on the `bypassOutcome` branch's
+    /// resolved probability (Section 6.1). OPTIONAL, and co-required with
+    /// `bypassOutcome` (E-141 if only one of the pair is present).
+    #[serde(default, rename = "maxBypassProbability")]
+    pub max_bypass_probability: Option<f64>,
 }
 
 /// Every Threat Model/Control that parsed and validated successfully.
@@ -242,6 +277,34 @@ pub fn parse_and_validate_security(doc: &EtlDocument) -> (SecurityData, Vec<Diag
                         has_error = true;
                     }
 
+                    match (&control.bypass_outcome, &control.max_bypass_probability) {
+                        (Some(outcome), Some(_)) => {
+                            if let Some(node) = resolve_control_barrier_node(doc, &control.node_ref) {
+                                if !node.branches.iter().any(|b| &b.outcome == outcome) {
+                                    diagnostics.push(Diagnostic::error(
+                                        "E-141",
+                                        format!(
+                                            "x-security: control '{}': bypassOutcome '{}' does not match any branch outcome of '{}'",
+                                            control.id, outcome, control.node_ref
+                                        ),
+                                    ));
+                                    has_error = true;
+                                }
+                            }
+                        }
+                        (None, None) => {}
+                        _ => {
+                            diagnostics.push(Diagnostic::error(
+                                "E-141",
+                                format!(
+                                    "x-security: control '{}': bypassOutcome and maxBypassProbability must both be declared together, or neither",
+                                    control.id
+                                ),
+                            ));
+                            has_error = true;
+                        }
+                    }
+
                     for leaf_id in &control.mitigates {
                         if !all_leaf_ids.contains(leaf_id) {
                             diagnostics.push(Diagnostic::error(
@@ -277,7 +340,39 @@ pub fn parse_and_validate_security(doc: &EtlDocument) -> (SecurityData, Vec<Diag
         }
     }
 
+    check_uncontrolled_categorized_threats(&data, &mut diagnostics);
+
     (data, diagnostics)
+}
+
+/// W-416: a leaf some Threat Model categorized (a `leafCategories` key
+/// exists for it, regardless of whether that category's own STRIDE value
+/// was itself valid — the same "key existing is what matters" reading
+/// W-411 uses) but that appears in zero declared Controls' `mitigates`
+/// anywhere — an uncontrolled categorized threat. The inverse of W-411,
+/// which flags the opposite direction (a `mitigates` entry with no
+/// category). Needs the full `mitigates` union across every control, so
+/// it runs as a pass over the fully-parsed `data` after both loops above
+/// complete, not inline in either one.
+fn check_uncontrolled_categorized_threats(data: &SecurityData, diagnostics: &mut Vec<Diagnostic>) {
+    let mitigated: BTreeSet<&str> = data
+        .controls
+        .iter()
+        .flat_map(|c| c.mitigates.iter().map(String::as_str))
+        .collect();
+    for tm in &data.threat_models {
+        for leaf_id in tm.leaf_categories.keys() {
+            if !mitigated.contains(leaf_id.as_str()) {
+                diagnostics.push(Diagnostic::warning(
+                    "W-416",
+                    format!(
+                        "x-security: threat model '{}': leaf '{}' is categorized but no declared control's mitigates targets it",
+                        tm.id, leaf_id
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 /// Resolve a Control's `nodeRef` against the document's own `eventTrees` —
@@ -296,6 +391,102 @@ fn resolve_barrier_ref(doc: &EtlDocument, node_ref: &str) -> bool {
             .and_then(|t| t.nodes.get(*node_id))
             .is_some_and(|n| matches!(n, Node::Barrier(_))),
         _ => false,
+    }
+}
+
+/// Resolves a Control's `nodeRef` to the actual `&Barrier` node — needed
+/// (unlike [`resolve_barrier_ref`]'s plain bool) so `bypassOutcome`
+/// validation and [`resolve_bypass_branch`] can inspect `branches`.
+fn resolve_control_barrier_node<'a>(
+    doc: &'a EtlDocument,
+    node_ref: &str,
+) -> Option<&'a etdl_parser::ast::Barrier> {
+    let rest = node_ref.trim_start_matches('#');
+    let after = rest.strip_prefix("/eventTrees/")?;
+    match after.split('/').collect::<Vec<_>>().as_slice() {
+        [tree_id, "nodes", node_id] if !tree_id.is_empty() && !node_id.is_empty() => {
+            match doc.event_trees.get(*tree_id)?.nodes.get(*node_id)? {
+                Node::Barrier(b) => Some(b),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Resolves a Control's `bypassOutcome` (Section 4.2) to the actual
+/// `&Branch` of its own core Barrier node — used by
+/// [`validate_control_thresholds`] (Section 6.1) and
+/// `codegen::rust::try_render_security_condition` (Section 6.2). `None` if
+/// `bypass_outcome` is `None`, or if `nodeRef`/`bypassOutcome` don't
+/// resolve (already reported by [`parse_and_validate_security`] as
+/// `E-141`) — a lookup, not a second validator.
+pub(crate) fn resolve_bypass_branch<'a>(
+    doc: &'a EtlDocument,
+    control: &Control,
+) -> Option<&'a etdl_parser::ast::Branch> {
+    let outcome = control.bypass_outcome.as_ref()?;
+    let node = resolve_control_barrier_node(doc, &control.node_ref)?;
+    node.branches.iter().find(|b| &b.outcome == outcome)
+}
+
+/// Verifies every Control with both `bypassOutcome` and
+/// `maxBypassProbability` declared against its `bypassOutcome` branch's
+/// *resolved* probability (Section 6.1) — **E-142** if the resolved
+/// probability exceeds the declared ceiling. Unlike Safety's SIL, which
+/// checks against a 4-level IEC 61508 band, this is a single declared
+/// ceiling: `resolved_probability <= max_bypass_probability`.
+///
+/// The one exception to this module's usual "stay on the generic
+/// extension path" discipline (see module docs): needs *resolved*
+/// fault-tree probabilities, which `EtdlExtension::validate`'s generic
+/// signature has no way to receive, so this is called directly from
+/// `Compiler::validate_with_base` (`lib.rs`), right after
+/// `safety::validate_sil_constraints` — same reason, same placement.
+///
+/// Re-derives [`parse_and_validate_security`]'s `controls` (its own
+/// diagnostics discarded — already reported by the generic-extension-path
+/// call earlier in the same pipeline run).
+pub(crate) fn validate_control_thresholds(
+    doc: &EtlDocument,
+    fault_tree_probs: &BTreeMap<String, f64>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if !crate::validate::declares_supplement(doc, SECURITY_SUPPLEMENT) {
+        return;
+    }
+
+    let (data, _security_diagnostics) = parse_and_validate_security(doc);
+    for control in &data.controls {
+        let Some(threshold) = control.max_bypass_probability else {
+            continue;
+        };
+        // `None` here means the control's own nodeRef/bypassOutcome didn't
+        // resolve, or bypassOutcome wasn't declared — already reported
+        // (E-141) or a no-op (no bypassOutcome, so no verification opted
+        // into) by parse_and_validate_security itself.
+        let Some(branch) = resolve_bypass_branch(doc, control) else {
+            continue;
+        };
+        // `None` here should be unreachable — core's own V-203 already
+        // requires every branch to have *some* resolvable probability —
+        // but stays a silent skip rather than a panic if it ever isn't.
+        let Some(p) = crate::codegen::rust::get_branch_prob(branch, &control.id, fault_tree_probs) else {
+            continue;
+        };
+
+        if p > threshold {
+            diagnostics.push(Diagnostic::error(
+                "E-142",
+                format!(
+                    "x-security: control '{}': bypassOutcome '{}' resolves to probability {:.6}, exceeding the declared maxBypassProbability {:.6}",
+                    control.id,
+                    control.bypass_outcome.as_deref().unwrap_or(""),
+                    p,
+                    threshold
+                ),
+            ));
+        }
     }
 }
 
@@ -339,7 +530,7 @@ impl crate::extension::EtdlExtension for SecurityExtension {
             summary: "STRIDE-classified attack trees (reusing etdl.tree-event's Tree structure) \
                       and Controls mapped onto core Barrier nodes.",
             schema: Some(SECURITY_SCHEMA),
-            diagnostic_codes: &["E-140", "E-141", "W-411"],
+            diagnostic_codes: &["E-140", "E-141", "E-142", "E-143", "W-411", "W-416"],
             requires: &["etdl.tree-event"],
         }
     }
@@ -473,12 +664,20 @@ eventTrees:
       framework: "NIST-800-53"
       controlId: "SC-5"
       mitigates: ["CredentialStuffing"]
+    - id: leak-monitor
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RateLimitBarrier"
+      framework: "NIST-800-53"
+      controlId: "AU-6"
+      mitigates: ["ApiKeyLeak"]
 "##,
         );
+        // Every categorized leaf (CredentialStuffing, ApiKeyLeak) has a
+        // mitigating control -> no W-416 either, a genuinely fully-covered
+        // example, not just an absence of errors.
         let (data, diagnostics) = parse_and_validate_security(&doc);
         assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
         assert_eq!(data.threat_models.len(), 1);
-        assert_eq!(data.controls.len(), 1);
+        assert_eq!(data.controls.len(), 2);
     }
 
     #[test]
@@ -543,7 +742,13 @@ eventTrees:
 
     #[test]
     fn uncategorized_leaf_is_not_an_error() {
-        // Section 4.1: "not every leaf needs an entry".
+        // Section 4.1: "not every leaf needs an entry" — the point of this
+        // test is ApiKeyLeak (no leafCategories entry at all). It produces
+        // no diagnostic of its own. CredentialStuffing (categorized here,
+        // deliberately given no mitigating control) does produce the
+        // separate, orthogonal W-416 warning this fixture doesn't bother
+        // suppressing — hence checking for errors specifically, not "zero
+        // diagnostics", which is what this test's own name promises.
         let doc = doc_with_security(
             r##"  threatModels:
     - id: tm1
@@ -553,7 +758,7 @@ eventTrees:
 "##,
         );
         let (data, diagnostics) = parse_and_validate_security(&doc);
-        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+        assert!(!diagnostics.iter().any(|d| d.is_error()), "unexpected error: {diagnostics:?}");
         assert_eq!(data.threat_models.len(), 1);
     }
 
@@ -707,5 +912,226 @@ x-security:
         assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
         assert_eq!(result.extension_id(), SECURITY_SUPPLEMENT);
         assert!(result.basic_event_overrides().is_empty());
+    }
+
+    #[test]
+    fn bypass_outcome_without_max_bypass_probability_produces_e141() {
+        let doc = doc_with_security(
+            r##"  controls:
+    - id: c1
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RateLimitBarrier"
+      controlId: "SC-5"
+      mitigates: ["CredentialStuffing"]
+      bypassOutcome: "FAILURE"
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_security(&doc);
+        assert!(data.controls.is_empty());
+        assert!(
+            diagnostics.iter().any(|d| d.code == "E-141" && d.message.contains("must both be declared")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn max_bypass_probability_without_bypass_outcome_produces_e141() {
+        let doc = doc_with_security(
+            r##"  controls:
+    - id: c1
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RateLimitBarrier"
+      controlId: "SC-5"
+      mitigates: ["CredentialStuffing"]
+      maxBypassProbability: 0.05
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_security(&doc);
+        assert!(data.controls.is_empty());
+        assert!(
+            diagnostics.iter().any(|d| d.code == "E-141" && d.message.contains("must both be declared")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn mismatched_bypass_outcome_produces_e141() {
+        // RateLimitBarrier's only declared branch outcome is SUCCESS
+        // (`doc_with_security`'s fixture) — "NOPE" cannot resolve.
+        let doc = doc_with_security(
+            r##"  controls:
+    - id: c1
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RateLimitBarrier"
+      controlId: "SC-5"
+      mitigates: ["CredentialStuffing"]
+      bypassOutcome: "NOPE"
+      maxBypassProbability: 0.05
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_security(&doc);
+        assert!(data.controls.is_empty());
+        assert!(
+            diagnostics.iter().any(|d| d.code == "E-141" && d.message.contains("bypassOutcome")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn valid_bypass_outcome_and_threshold_have_no_diagnostics() {
+        let doc = doc_with_security(
+            r##"  threatModels:
+    - id: tm1
+      treeRef: "gateway-compromise"
+      leafCategories:
+        CredentialStuffing: spoofing
+  controls:
+    - id: c1
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RateLimitBarrier"
+      controlId: "SC-5"
+      mitigates: ["CredentialStuffing"]
+      bypassOutcome: "SUCCESS"
+      maxBypassProbability: 0.5
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_security(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+        assert_eq!(data.controls.len(), 1);
+        assert_eq!(data.controls[0].bypass_outcome.as_deref(), Some("SUCCESS"));
+        assert_eq!(data.controls[0].max_bypass_probability, Some(0.5));
+    }
+
+    #[test]
+    fn categorized_leaf_with_no_mitigating_control_produces_w416() {
+        let doc = doc_with_security(
+            r##"  threatModels:
+    - id: tm1
+      treeRef: "gateway-compromise"
+      leafCategories:
+        CredentialStuffing: spoofing
+"##,
+        );
+        let (_data, diagnostics) = parse_and_validate_security(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "W-416"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn categorized_leaf_with_mitigating_control_has_no_w416() {
+        let doc = doc_with_security(
+            r##"  threatModels:
+    - id: tm1
+      treeRef: "gateway-compromise"
+      leafCategories:
+        CredentialStuffing: spoofing
+  controls:
+    - id: c1
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RateLimitBarrier"
+      controlId: "SC-5"
+      mitigates: ["CredentialStuffing"]
+"##,
+        );
+        let (_data, diagnostics) = parse_and_validate_security(&doc);
+        assert!(!diagnostics.iter().any(|d| d.code == "W-416"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn uncategorized_leaf_produces_no_w416() {
+        // W-416 only applies to leaves a Threat Model actually categorized
+        // — an uncategorized leaf with no control is not itself flagged by
+        // this rule (that's simply "nothing declared about it at all").
+        let doc = doc_with_security(
+            r##"  threatModels:
+    - id: tm1
+      treeRef: "gateway-compromise"
+      leafCategories: {}
+"##,
+        );
+        let (_data, diagnostics) = parse_and_validate_security(&doc);
+        assert!(!diagnostics.iter().any(|d| d.code == "W-416"), "got {diagnostics:?}");
+    }
+
+    fn doc_with_fault_tree_backed_control(threshold: f64, basic_event_probability: f64) -> EtlDocument {
+        let yaml = format!(
+            r##"
+etdl: "1.0.0"
+info: {{ title: "T", version: "1.0.0", domain: "D" }}
+supplements:
+  - id: etdl.security
+    version: "1.0"
+  - id: etdl.tree-event
+    version: "1.0"
+components:
+  messages:
+    M:
+      payload: {{ type: object }}
+faultTrees:
+  RateLimitBypass:
+    topEvent: {{ id: Top, description: "d", rootCause: BE }}
+    basicEvents:
+      BE: {{ description: "d", probability: {basic_event_probability} }}
+eventTrees:
+  T:
+    initiatingEvent: {{ id: I, message: "#/components/messages/M", next: RateLimitBarrier }}
+    nodes:
+      RateLimitBarrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: default
+            probability: {success_probability}
+            next: C
+          - outcome: FAILURE
+            condition: "message.payload.forceFailure == true"
+            probabilitySource: "#/faultTrees/RateLimitBypass/topEvent"
+            next: C
+      C: {{ type: consequence, operation: terminate }}
+x-tree-event:
+  trees:
+    - id: "rate-limit-attack-tree"
+      version: "1"
+      root: "Bypassed"
+      nodes:
+        RateLimitBypassLeaf:
+          kind: leaf
+        OtherLeaf:
+          kind: leaf
+        Bypassed:
+          kind: gate
+          gate: OR
+          children: ["RateLimitBypassLeaf", "OtherLeaf"]
+x-security:
+  threatModels:
+    - id: tm1
+      treeRef: "rate-limit-attack-tree"
+      leafCategories: {{}}
+  controls:
+    - id: c1
+      nodeRef: "#/eventTrees/T/nodes/RateLimitBarrier"
+      controlId: "SC-5"
+      mitigates: ["RateLimitBypassLeaf"]
+      bypassOutcome: FAILURE
+      maxBypassProbability: {threshold}
+"##,
+            success_probability = 1.0 - basic_event_probability,
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
+    fn validate_thresholds(doc: &EtlDocument) -> Vec<Diagnostic> {
+        let fault_tree_probs = crate::fault_tree::resolve_fault_trees(doc, &mut Vec::new());
+        let mut diagnostics = Vec::new();
+        validate_control_thresholds(doc, &fault_tree_probs, &mut diagnostics);
+        diagnostics
+    }
+
+    #[test]
+    fn resolved_probability_at_or_under_threshold_has_no_e142() {
+        let doc = doc_with_fault_tree_backed_control(0.01, 0.01);
+        let diagnostics = validate_thresholds(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+    }
+
+    #[test]
+    fn resolved_probability_over_threshold_produces_e142() {
+        let doc = doc_with_fault_tree_backed_control(0.001, 0.05);
+        let diagnostics = validate_thresholds(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-142"), "got {diagnostics:?}");
     }
 }

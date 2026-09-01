@@ -41,6 +41,14 @@ struct CodegenCtx<'a> {
     /// above. Empty (`hazards`/`barriers: vec![]`) for a document that
     /// doesn't declare `etdl.safety`.
     safety: &'a crate::safety::SafetyData,
+    /// Parsed once per `generate_all` call, same rationale as `safety`
+    /// above. Empty (`threat_models`/`controls: vec![]`) for a document
+    /// that doesn't declare `etdl.security`.
+    security: &'a crate::security::SecurityData,
+    /// Parsed once per `generate_all` call, same rationale as `safety`/
+    /// `security` above. Empty (`correlations`/`anomaly_rules: vec![]`)
+    /// for a document that doesn't declare `etdl.diagnostics`.
+    diagnostics: &'a crate::diagnostics::DiagnosticsData,
 }
 
 impl Default for RustCodeGenerator {
@@ -117,6 +125,20 @@ impl CodeGenerator for RustCodeGenerator {
         // populated for any fault tree it names.
         let (safety, _safety_diagnostics) = crate::safety::parse_and_validate_safety(doc);
 
+        // Same "already validated, diagnostics deliberately discarded"
+        // rationale as `safety` above. No registration codegen of its own
+        // — `security.control_effective` only ever reads
+        // `etdl_core::live::current_probability`, same as
+        // `safety.sil_maintained`.
+        let (security, _security_diagnostics) = crate::security::parse_and_validate_security(doc);
+
+        // Same "already validated, diagnostics deliberately discarded"
+        // rationale as the others above. No ECEL/registration codegen of
+        // its own — consulted only by `render_record_branch_call`'s
+        // correlation lookup (Section 6 of the Diagnostics Supplement).
+        let (diagnostics_data, _diagnostics_diagnostics) =
+            crate::diagnostics::parse_and_validate_diagnostics(doc);
+
         for (tree_id, tree) in &doc.event_trees {
             let ctx = CodegenCtx {
                 doc,
@@ -126,6 +148,8 @@ impl CodeGenerator for RustCodeGenerator {
                 live_reliability: &live_reliability,
                 performance: &performance,
                 safety: &safety,
+                security: &security,
+                diagnostics: &diagnostics_data,
             };
             let handler_code = generate_event_tree_handler(&ctx, tree_id, tree)?;
             output.push_str(&handler_code);
@@ -462,10 +486,45 @@ fn live_reliability_triple_for_branch(
         .and_then(|ps| live_reliability_triple_for_ref(ctx, ps))
 }
 
+/// The Diagnostics Supplement Correlation whose `spanValue` names this
+/// exact node — matched only for `spanAttribute == "etdl.node.id"`, the
+/// only attribute the reference runtime ever emits (see
+/// `diagnostics.rs`'s own E-152 check, which uses the same match). "First
+/// match wins" (`.find`) is the deterministic tie-break if more than one
+/// Correlation targets the same node id — this module doesn't otherwise
+/// forbid that overlap.
+fn diagnostics_correlation_for<'a>(
+    ctx: &'a CodegenCtx,
+    node_id: &str,
+) -> Option<&'a crate::diagnostics::Correlation> {
+    ctx.diagnostics
+        .correlations
+        .iter()
+        .find(|c| c.span_attribute == "etdl.node.id" && c.span_value == node_id)
+}
+
+/// Renders a `record_branch`/`record_branch_with_cause` call's shared
+/// `cause_ref`/`description` argument tail, when `node_id` matches a
+/// declared Diagnostics Correlation — empty string otherwise (so the
+/// caller's format string degrades to the plain call with no arguments to
+/// drop).
+fn render_correlation_call_suffix(ctx: &CodegenCtx, node_id: &str) -> Option<(String, String)> {
+    let c = diagnostics_correlation_for(ctx, node_id)?;
+    let description_arg = match &c.description {
+        Some(d) => format!("Some({d:?})"),
+        None => "None".to_string(),
+    };
+    Some((format!("{:?}", c.cause_ref), description_arg))
+}
+
 /// Renders the `record_branch` probability argument: the live current
 /// value (falling back to the compile-time constant on cold start) when
 /// this branch's fault tree is live-tracked, or just the constant
-/// otherwise — byte-identical to today's output in that case.
+/// otherwise — byte-identical to today's output in that case. Also picks
+/// `record_branch_with_cause` over `record_branch` when `node_id` matches
+/// a declared Diagnostics Correlation (Section 6 of the Diagnostics
+/// Supplement) — a document that doesn't declare `etdl.diagnostics`, or a
+/// node with no matching correlation, still gets today's plain call.
 fn render_record_branch_call(
     ctx: &CodegenCtx,
     branch: &etdl_parser::ast::Branch,
@@ -482,10 +541,16 @@ fn render_record_branch_call(
         ),
         None => format!("{p:.6}"),
     };
-    format!(
-        "{indent}    {monitor_name}.record_branch(\"{node_id}\", \"{}\", {prob_expr});\n",
-        branch.outcome
-    )
+    match render_correlation_call_suffix(ctx, node_id) {
+        Some((cause_ref_arg, description_arg)) => format!(
+            "{indent}    {monitor_name}.record_branch_with_cause(\"{node_id}\", \"{}\", {prob_expr}, {cause_ref_arg}, {description_arg});\n",
+            branch.outcome
+        ),
+        None => format!(
+            "{indent}    {monitor_name}.record_branch(\"{node_id}\", \"{}\", {prob_expr});\n",
+            branch.outcome
+        ),
+    }
 }
 
 /// Renders a branch's condition: `reliability.in_range == <bool>`,
@@ -518,6 +583,9 @@ fn render_condition(
             return Ok(rendered);
         }
         if let Some(rendered) = try_render_safety_condition(ctx, tree_id, node_id, cmp)? {
+            return Ok(rendered);
+        }
+        if let Some(rendered) = try_render_security_condition(ctx, tree_id, node_id, cmp)? {
             return Ok(rendered);
         }
     }
@@ -729,6 +797,118 @@ fn try_render_safety_condition(
 
     let call = format!(
         "etdl_core::live::current_probability({ft_id:?}, {node:?}).map(|p| p >= {low:.6} && p < {high:.6}).unwrap_or(true)"
+    );
+    Ok(Some(if negate { format!("!({call})") } else { call }))
+}
+
+/// The Control Object whose `nodeRef` names this specific Barrier node —
+/// a Control's own `nodeRef` *is* the barrier (mirrors
+/// `safety_barrier_for` — no extra linking object needed, unlike
+/// Performance's `barrierChecks`).
+fn security_control_for<'a>(
+    ctx: &'a CodegenCtx,
+    tree_id: &str,
+    node_id: &str,
+) -> Option<&'a crate::security::Control> {
+    let target = format!("#/eventTrees/{tree_id}/nodes/{node_id}");
+    ctx.security.controls.iter().find(|c| c.node_ref == target)
+}
+
+/// Mirrors `try_render_safety_condition` exactly, for
+/// `security.control_effective`: a Control's own `nodeRef` already names
+/// this barrier (`security_control_for`), its linked Fault Tree is one
+/// more step away through the control's own `bypassOutcome` branch's
+/// `probability_source`, and that Fault Tree must *also* be declared
+/// under `x-live-reliability`. Unlike Safety's SIL, which checks a
+/// resolved probability against a 4-level band, this checks against a
+/// single declared ceiling (`maxBypassProbability`) — `p <= threshold`,
+/// not `low <= p < high`.
+fn try_render_security_condition(
+    ctx: &CodegenCtx,
+    tree_id: &str,
+    node_id: &str,
+    cmp: &ecel::Comparison,
+) -> Result<Option<String>, String> {
+    fn is_security_path(op: &ecel::Operand) -> bool {
+        matches!(
+            op,
+            ecel::Operand::Value(ecel::ValueExpr::Path(p))
+                if matches!(p.segments.first(), Some(ecel::PathSegment::Field(s)) if s == "security")
+        )
+    }
+
+    let literal_side = if is_security_path(&cmp.left) {
+        &cmp.right
+    } else if is_security_path(&cmp.right) {
+        &cmp.left
+    } else {
+        return Ok(None);
+    };
+
+    let expect_true = match literal_side {
+        ecel::Operand::Literal(ecel::Literal::Bool(b)) => *b,
+        // typeck's V-204 already rejects comparing a Bool-typed path
+        // against anything but a bool literal — unreachable in practice.
+        _ => return Ok(None),
+    };
+    let negate = match cmp.op {
+        ecel::Comparator::Eq => !expect_true,
+        ecel::Comparator::Neq => expect_true,
+        _ => return Ok(None),
+    };
+
+    let Some(control) = security_control_for(ctx, tree_id, node_id) else {
+        return Err(
+            "branch condition uses 'security.control_effective' but this barrier has no \
+             x-security.controls entry naming it"
+                .to_string(),
+        );
+    };
+
+    let Some(threshold) = control.max_bypass_probability else {
+        return Err(format!(
+            "security control '{}': no maxBypassProbability declared, needed for \
+             'security.control_effective'",
+            control.id
+        ));
+    };
+
+    let Some(branch) = crate::security::resolve_bypass_branch(ctx.doc, control) else {
+        return Err(format!(
+            "security control '{}': bypassOutcome '{:?}' does not resolve to a branch",
+            control.id, control.bypass_outcome
+        ));
+    };
+
+    let Some(ref ps) = branch.probability_source else {
+        return Err(format!(
+            "security control '{}': bypassOutcome branch has a static-literal probability, \
+             no Fault Tree to live-track for 'security.control_effective'",
+            control.id
+        ));
+    };
+
+    let ft_id = extract_ft_id(&ps.pointer);
+    let Some(fault_tree) = ctx.doc.fault_trees.as_ref().and_then(|fts| fts.get(&ft_id)) else {
+        return Err(format!(
+            "security control '{}': bypassOutcome references fault tree '{ft_id}', which does \
+             not exist",
+            control.id
+        ));
+    };
+    if !ctx.live_reliability.fault_trees.iter().any(|d| d.id == ft_id) {
+        return Err(format!(
+            "branch condition uses 'security.control_effective' but fault tree '{ft_id}' \
+             (behind security control '{}') is not declared under etdl.live-reliability",
+            control.id
+        ));
+    }
+
+    // `root_cause`, not `top_event.id` — same lesson as `try_render_safety_condition`.
+    let node = &fault_tree.top_event.root_cause;
+
+    let call = format!(
+        "etdl_core::live::current_probability({ft_id:?}, {node:?}).map(|p| p <= {threshold:.6}).unwrap_or(true)"
     );
     Ok(Some(if negate { format!("!({call})") } else { call }))
 }
@@ -1093,10 +1273,16 @@ fn generate_operation_code(
     if op.on_failure.is_some() {
         if let Some(ref ps) = op.on_failure_probability_source {
             let prob_arg = render_prob_option_arg(ctx, ps, node_id);
-            output.push_str(&format!(
-                "{}        {}.record_success(\"{}\", {});\n",
-                indent, monitor_name, node_id, prob_arg
-            ));
+            match render_correlation_call_suffix(ctx, node_id) {
+                Some((cause_ref_arg, description_arg)) => output.push_str(&format!(
+                    "{}        {}.record_success_with_cause(\"{}\", {}, {}, {});\n",
+                    indent, monitor_name, node_id, prob_arg, cause_ref_arg, description_arg
+                )),
+                None => output.push_str(&format!(
+                    "{}        {}.record_success(\"{}\", {});\n",
+                    indent, monitor_name, node_id, prob_arg
+                )),
+            }
         }
     }
 
@@ -1121,10 +1307,16 @@ fn generate_operation_code(
             Some(ps) => render_prob_option_arg(ctx, ps, node_id),
             None => "None".to_string(),
         };
-        output.push_str(&format!(
-            "{}        {}.record_failure(\"{}\", &err, {});\n",
-            indent, monitor_name, node_id, prob_arg
-        ));
+        match render_correlation_call_suffix(ctx, node_id) {
+            Some((cause_ref_arg, description_arg)) => output.push_str(&format!(
+                "{}        {}.record_failure_with_cause(\"{}\", &err, {}, {}, {});\n",
+                indent, monitor_name, node_id, prob_arg, cause_ref_arg, description_arg
+            )),
+            None => output.push_str(&format!(
+                "{}        {}.record_failure(\"{}\", &err, {});\n",
+                indent, monitor_name, node_id, prob_arg
+            )),
+        }
 
         let on_failure_id = op.on_failure.as_ref().unwrap();
         match tree.nodes.get(on_failure_id) {
@@ -2178,6 +2370,8 @@ faultTrees:
         let live_reliability = crate::live_reliability::LiveReliabilityData::default();
         let performance = crate::performance::PerformanceData::default();
         let safety = crate::safety::SafetyData::default();
+        let security = crate::security::SecurityData::default();
+        let diagnostics_data = crate::diagnostics::DiagnosticsData::default();
         let ctx = CodegenCtx {
             doc: &doc,
             fault_tree_probs: &probs,
@@ -2186,6 +2380,8 @@ faultTrees:
             live_reliability: &live_reliability,
             performance: &performance,
             safety: &safety,
+            security: &security,
+            diagnostics: &diagnostics_data,
         };
         condition_to_rust_code(&ctx, &cond)
     }

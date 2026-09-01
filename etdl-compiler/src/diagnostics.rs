@@ -4,11 +4,19 @@
 //! Reads a document's `x-diagnostics` extension field (the same generic
 //! `x-*` mechanism every extension already uses — zero parser/AST changes
 //! were needed), deserializes it into [`Correlation`]/[`AnomalyRule`]
-//! values, and validates them. Structural metadata only: it declares which
-//! runtime telemetry attribute a document's author expects to correlate
-//! with which Fault-Tree cause, for a human or external tool doing
-//! post-incident triage to consult. It performs no automated correlation,
-//! root-cause inference, or telemetry ingestion of its own.
+//! values, and validates them. It declares which runtime telemetry
+//! attribute a document's author expects to correlate with which
+//! Fault-Tree cause. It still performs no automated inference of its own —
+//! a Correlation is always author-declared, never computed — but
+//! generated code now *surfaces* an already-declared Correlation
+//! alongside an SLA anomaly independently detected at a matching node
+//! (Section 6; `codegen/rust.rs`'s `diagnostics_correlation_for`,
+//! `etdl_core::monitor::BranchMonitor::record_branch_with_cause` and its
+//! `record_failure_with_cause`/`record_success_with_cause` siblings). This
+//! is reference resolution and presentation, not inference: this module
+//! never decides *whether* something is anomalous (`etdl_core::sla`
+//! already does that, unchanged), only which already-declared metadata to
+//! attach once an anomaly independently fires.
 //!
 //! Registered like [`crate::performance::PerformanceExtension`] and
 //! [`crate::safety::SafetyExtension`] — no bespoke direct call anywhere in
@@ -20,6 +28,13 @@
 //! - A `correlations`/`anomalyRules` manifest that fails to deserialize at
 //!   all is folded into **E-150** (no dedicated "manifest invalid" code
 //!   exists here either, matching Performance's/Safety's own precedent).
+//! - **E-152** only checks a Correlation's `spanValue` against real node
+//!   ids when its `spanAttribute` is exactly `"etdl.node.id"` — the only
+//!   attribute the reference runtime ever emits
+//!   (`etdl_core::telemetry::attach_node_span_attribute`). Any other
+//!   `spanAttribute` value is left unchecked (spec Section 4.1: both
+//!   fields are free-form), since this specification does not own or
+//!   interpret third-party telemetry attribute names.
 //! - **W-412**'s prose ("an Operation with neither `onFailureProbabilitySource`
 //!   nor any Fault Tree reachable from this document that a Correlation
 //!   Object's `causeRef` could plausibly connect it to") is implemented as:
@@ -106,6 +121,26 @@ pub fn parse_and_validate_diagnostics(doc: &EtlDocument) -> (DiagnosticsData, Ve
                             format!(
                                 "x-diagnostics: correlation '{}': causeRef '{}' does not resolve to a Gate or Basic Event",
                                 correlation.id, correlation.cause_ref
+                            ),
+                        ));
+                        has_error = true;
+                    }
+
+                    // E-152: only checked for `etdl.node.id` specifically —
+                    // the *only* attribute the reference runtime ever emits
+                    // (`etdl_core::telemetry::attach_node_span_attribute`).
+                    // `spanAttribute`/`spanValue` are otherwise free-form
+                    // (spec Section 4.1), so this stays a targeted
+                    // cross-check for the one attribute this codebase's own
+                    // runtime actually produces, not a blanket requirement.
+                    if correlation.span_attribute == "etdl.node.id"
+                        && !node_id_exists_anywhere(doc, &correlation.span_value)
+                    {
+                        diagnostics.push(Diagnostic::error(
+                            "E-152",
+                            format!(
+                                "x-diagnostics: correlation '{}': spanAttribute is 'etdl.node.id' but spanValue '{}' does not name a node in any declared eventTree",
+                                correlation.id, correlation.span_value
                             ),
                         ));
                         has_error = true;
@@ -209,6 +244,14 @@ fn resolve_cause_ref(doc: &EtlDocument, cause_ref: &str) -> bool {
     }
 }
 
+/// Whether `node_id` names a node in *any* of the document's `eventTrees`
+/// (any tree, any node kind) — needed for E-152, which is deliberately
+/// document-wide, not scoped to one tree (a Correlation's `spanValue` for
+/// `etdl.node.id` has no tree context of its own to narrow the search).
+fn node_id_exists_anywhere(doc: &EtlDocument, node_id: &str) -> bool {
+    doc.event_trees.values().any(|t| t.nodes.contains_key(node_id))
+}
+
 /// Resolve an Anomaly Rule's `monitors` against the document's own
 /// `eventTrees` — unlike `performance`'s `nodeRef` (Operation or whole
 /// tree) and `safety`'s (Barrier only), `monitors` accepts **any** node
@@ -288,7 +331,7 @@ impl crate::extension::EtdlExtension for DiagnosticsExtension {
                       monitored-node anomaly rules; structural metadata only, no automated \
                       correlation or inference.",
             schema: Some(DIAGNOSTICS_SCHEMA),
-            diagnostic_codes: &["E-150", "E-151", "W-412"],
+            diagnostic_codes: &["E-150", "E-151", "E-152", "W-412"],
             requires: &[],
         }
     }
@@ -592,5 +635,53 @@ eventTrees:
         assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
         assert_eq!(result.extension_id(), DIAGNOSTICS_SUPPLEMENT);
         assert!(result.basic_event_overrides().is_empty());
+    }
+
+    #[test]
+    fn etdl_node_id_span_value_not_a_real_node_produces_e152() {
+        let doc = doc_with_diagnostics(
+            r##"  correlations:
+    - id: c1
+      spanAttribute: "etdl.node.id"
+      spanValue: "DoesNotExist"
+      causeRef: "#/faultTrees/PaymentGatewayFailure/basicEvents/GatewayUnreachable"
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_diagnostics(&doc);
+        assert!(data.correlations.is_empty());
+        assert!(diagnostics.iter().any(|d| d.code == "E-152"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn etdl_node_id_span_value_matching_a_real_node_has_no_e152() {
+        let doc = doc_with_diagnostics(
+            r##"  correlations:
+    - id: c1
+      spanAttribute: "etdl.node.id"
+      spanValue: "ProcessPaymentOperation"
+      causeRef: "#/faultTrees/PaymentGatewayFailure/basicEvents/GatewayUnreachable"
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_diagnostics(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+        assert_eq!(data.correlations.len(), 1);
+    }
+
+    #[test]
+    fn non_etdl_node_id_span_attribute_is_never_checked_against_nodes() {
+        // spanAttribute/spanValue are otherwise free-form (spec Section
+        // 4.1) — E-152 only ever fires for the one attribute the reference
+        // runtime actually emits.
+        let doc = doc_with_diagnostics(
+            r##"  correlations:
+    - id: c1
+      spanAttribute: "some.other.attribute"
+      spanValue: "DoesNotExistEither"
+      causeRef: "#/faultTrees/PaymentGatewayFailure/basicEvents/GatewayUnreachable"
+"##,
+        );
+        let (data, diagnostics) = parse_and_validate_diagnostics(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+        assert_eq!(data.correlations.len(), 1);
     }
 }
