@@ -37,6 +37,7 @@ use etdl_parser::ast::EtlDocument;
 use etdl_parser::asyncapi::AsyncApiRegistry;
 
 pub mod codegen;
+pub mod context;
 pub mod diagnostics;
 pub mod extension;
 pub mod fault_tree;

@@ -972,6 +972,74 @@ faultTrees:
         let _ = std::fs::remove_dir_all(&out_dir);
     }
 
+    // --- `etdl context dump/graph/chunks` ---
+
+    #[test]
+    fn context_dump_multi_file_produces_one_array_entry_per_file() {
+        let (out, stdout) = run_cli(&[
+            "context",
+            "dump",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            fixture_path("safety-check.etdl").to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0), "got: {stdout}");
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&stdout).expect("valid JSON array");
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0]["ast"].is_object());
+        assert!(entries[1]["ast"].is_object());
+    }
+
+    #[test]
+    fn context_dump_continues_past_a_bad_file_in_the_batch() {
+        let (out, stdout) = run_cli(&[
+            "context",
+            "dump",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+            "/definitely/does/not/exist.etdl",
+        ]);
+        // A batch containing a bad file exits 1, but still reports the
+        // good file's AST rather than aborting the whole batch.
+        assert_eq!(out.status.code(), Some(1), "got: {stdout}");
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&stdout).expect("valid JSON array");
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0]["ast"].is_object(), "good file should still produce an ast: {stdout}");
+        assert!(entries[1]["error"].is_string(), "bad file should report an error: {stdout}");
+    }
+
+    #[test]
+    fn context_graph_produces_nodes_and_edges() {
+        let (out, stdout) = run_cli(&[
+            "context",
+            "graph",
+            fixture_path("order-fulfillment.etdl").to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0), "got: {stdout}");
+        let entries: Vec<serde_json::Value> = serde_json::from_str(&stdout).expect("valid JSON array");
+        let graph = &entries[0]["graph"];
+        assert!(graph["nodes"].as_array().unwrap().len() > 0);
+        assert!(graph["edges"].as_array().unwrap().len() > 0);
+    }
+
+    #[test]
+    fn context_chunks_emits_jsonl_with_expected_kinds() {
+        let (out, stdout) = run_cli(&[
+            "context",
+            "chunks",
+            fixture_path("safety-check.etdl").to_str().unwrap(),
+        ]);
+        assert_eq!(out.status.code(), Some(0), "got: {stdout}");
+        let kinds: Vec<String> = stdout
+            .lines()
+            .map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).expect("each line is valid JSON");
+                v["kind"].as_str().unwrap().to_string()
+            })
+            .collect();
+        for expected in ["document", "event_tree", "node.barrier", "fault_tree", "basic_event", "safety_barrier"] {
+            assert!(kinds.contains(&expected.to_string()), "missing '{expected}' in {kinds:?}");
+        }
+    }
+
     // --- Dynamic supplement plugins (`etdl install`, `etdl supplement list/remove`) ---
 
     mod supplement_plugins {

@@ -212,6 +212,18 @@ enum Command {
         #[command(subcommand)]
         command: TreeCommand,
     },
+    /// Export one or more documents as machine-consumable context for LLM
+    /// pipelines (RAG/CAG) rather than for compiling — a full JSON AST
+    /// dump, a unified `{nodes, edges}` graph, or RAG-ready chunks. Parse-only:
+    /// does not run `etdl validate`'s diagnostics or resolve fault-tree
+    /// probabilities. Accepts multiple files so a shell glob (e.g. `etdl
+    /// context dump *.etdl`) can export a whole directory in one call; a
+    /// per-file parse failure is reported inline and does not abort the
+    /// rest of the batch. See `docs/reference/context-export.md`.
+    Context {
+        #[command(subcommand)]
+        command: ContextCommand,
+    },
     /// Install a supplement plugin from a local `.wasm` file or an
     /// `https://` URL (sandboxed, run via `wasmtime`; see `etdl supplement
     /// list`/`remove` to manage installed plugins). Loads it once to
@@ -311,6 +323,31 @@ enum TreeCommand {
     Inspect {
         #[arg(help = "Path to .etdl document")]
         file: PathBuf,
+    },
+}
+
+#[derive(clap::Subcommand)]
+enum ContextCommand {
+    /// Dump each document's full parsed AST as JSON (one array entry per
+    /// file). Good for CAG: stuff the whole document into a long-context
+    /// prompt/cache.
+    Dump {
+        #[arg(help = "Paths to .etdl documents", required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// Export each document as a unified `{nodes, edges}` graph spanning
+    /// event trees, fault trees, and any declared `etdl.tree-event` trees
+    /// (one array entry per file).
+    Graph {
+        #[arg(help = "Paths to .etdl documents", required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// Export each document as RAG-ready chunks: one JSON object per line
+    /// (JSON Lines), each with an auto-generated natural-language `text`
+    /// summary suited for embedding, plus structured `metadata`.
+    Chunks {
+        #[arg(help = "Paths to .etdl documents", required = true)]
+        files: Vec<PathBuf>,
     },
 }
 
@@ -658,6 +695,11 @@ fn main() {
         Command::Tree { command } => match command {
             TreeCommand::Validate { file } => cmd_tree_validate(&flags, &file),
             TreeCommand::Inspect { file } => cmd_tree_inspect(&flags, &file),
+        },
+        Command::Context { command } => match command {
+            ContextCommand::Dump { files } => cmd_context_dump(&files),
+            ContextCommand::Graph { files } => cmd_context_graph(&files),
+            ContextCommand::Chunks { files } => cmd_context_chunks(&files),
         },
         Command::Install { source } => cmd_supplement_install(&flags, &source),
         Command::Supplement { command } => match command {
@@ -2668,6 +2710,104 @@ fn cmd_tree_inspect(flags: &CliFlags, file: &Path) -> i32 {
         }
     }
     if diagnostics.iter().any(|d| d.is_error()) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Like [`parse_document_or_exit`], but returns the error message instead
+/// of printing it and an exit code — `cmd_context_*` need the message
+/// embedded in their own per-file JSON/JSONL output, not just written to
+/// stderr, since a batch continues past a bad file rather than aborting.
+fn parse_document_for_context(file: &Path) -> Result<etdl_parser::ast::EtlDocument, String> {
+    let content = std::fs::read_to_string(file)
+        .map_err(|e| format!("cannot read file '{}': {}", file.display(), e))?;
+    etdl_parser::parse_document(&content).map_err(|e| e.to_string())
+}
+
+/// `etdl context dump <files...>`: dump each document's full parsed AST as
+/// JSON, one array entry per file. Mirrors `etdl-wasm::parse_for_diagram`
+/// (`serde_json::to_value(&doc)`) — parse-only, no validation.
+fn cmd_context_dump(files: &[PathBuf]) -> i32 {
+    let mut any_error = false;
+    let mut entries = Vec::with_capacity(files.len());
+    for file in files {
+        match parse_document_for_context(file) {
+            Ok(doc) => match serde_json::to_value(&doc) {
+                Ok(ast) => entries.push(serde_json::json!({ "file": file.display().to_string(), "ast": ast })),
+                Err(e) => {
+                    any_error = true;
+                    entries.push(serde_json::json!({ "file": file.display().to_string(), "error": e.to_string() }));
+                }
+            },
+            Err(e) => {
+                any_error = true;
+                entries.push(serde_json::json!({ "file": file.display().to_string(), "error": e }));
+            }
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&entries).expect("Vec<Value> always serializes"));
+    if any_error {
+        1
+    } else {
+        0
+    }
+}
+
+/// `etdl context graph <files...>`: export each document as a unified
+/// `{nodes, edges}` graph (`etdl_compiler::context::build_graph`), one
+/// array entry per file.
+fn cmd_context_graph(files: &[PathBuf]) -> i32 {
+    let mut any_error = false;
+    let mut entries = Vec::with_capacity(files.len());
+    for file in files {
+        match parse_document_for_context(file) {
+            Ok(doc) => {
+                let graph = etdl_compiler::context::build_graph(&doc);
+                entries.push(serde_json::json!({ "file": file.display().to_string(), "graph": graph }));
+            }
+            Err(e) => {
+                any_error = true;
+                entries.push(serde_json::json!({ "file": file.display().to_string(), "error": e }));
+            }
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&entries).expect("Vec<Value> always serializes"));
+    if any_error {
+        1
+    } else {
+        0
+    }
+}
+
+/// `etdl context chunks <files...>`: export each document as RAG-ready
+/// chunks (`etdl_compiler::context::build_chunks`) — JSON Lines, one
+/// compact object per line (the standard ingestion format for
+/// embedding/vector-store pipelines), each tagged with its source `file`.
+fn cmd_context_chunks(files: &[PathBuf]) -> i32 {
+    let mut any_error = false;
+    for file in files {
+        match parse_document_for_context(file) {
+            Ok(doc) => {
+                for chunk in etdl_compiler::context::build_chunks(&doc) {
+                    let line = serde_json::json!({
+                        "file": file.display().to_string(),
+                        "chunk_id": chunk.chunk_id,
+                        "kind": chunk.kind,
+                        "text": chunk.text,
+                        "metadata": chunk.metadata,
+                    });
+                    println!("{line}");
+                }
+            }
+            Err(e) => {
+                any_error = true;
+                println!("{}", serde_json::json!({ "file": file.display().to_string(), "error": e }));
+            }
+        }
+    }
+    if any_error {
         1
     } else {
         0
