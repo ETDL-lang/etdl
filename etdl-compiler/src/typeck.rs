@@ -416,6 +416,57 @@ fn check_value_expr(
                 );
             }
         }
+        ValueExpr::Path(path_expr) if is_safety_root(path_expr) => {
+            // Two supplements gate this one path, not just one — a
+            // genuine dependency `reliability.in_range`/`performance.in_budget`
+            // don't have: the SIL band comes from etdl.safety, the live
+            // value comes from etdl.live-reliability.
+            if !crate::validate::declares_supplement(ctx.doc, "etdl.safety") {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-135",
+                        format!(
+                            "barrier '{}' branch {}: '{}' requires the document to declare supplement etdl.safety",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if !crate::validate::declares_supplement(ctx.doc, "etdl.live-reliability") {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-135",
+                        format!(
+                            "barrier '{}' branch {}: '{}' also requires the document to declare supplement etdl.live-reliability",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if safety_path_type(path_expr) == EcelType::Unknown {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-135",
+                        format!(
+                            "barrier '{}' branch {}: 'safety' path must be exactly 'safety.sil_maintained', got '{}'",
+                            node_id, branch_idx, path_to_string(path_expr)
+                        ),
+                    )
+                    .at(key()),
+                );
+            } else if !top_level {
+                diagnostics.push(
+                    Diagnostic::error(
+                        "E-135",
+                        format!(
+                            "barrier '{}' branch {}: 'safety.sil_maintained' must be the entire branch condition, not combined with &&/||/! — split it into its own branch",
+                            node_id, branch_idx
+                        ),
+                    )
+                    .at(key()),
+                );
+            }
+        }
         ValueExpr::Path(_) | ValueExpr::Number(_) => {}
         ValueExpr::Call(func, arg) => {
             check_value_expr(ctx, arg, tree_name, node_id, branch_idx, false, diagnostics);
@@ -552,6 +603,9 @@ fn resolve_value_expr_type(ctx: &MessageContext, expr: &ValueExpr) -> EcelType {
         ValueExpr::Path(path_expr) if is_performance_root(path_expr) => {
             performance_path_type(path_expr)
         }
+        ValueExpr::Path(path_expr) if is_safety_root(path_expr) => {
+            safety_path_type(path_expr)
+        }
         ValueExpr::Path(path_expr) => {
             let segments: Vec<&PathSegment> = path_expr.segments.iter().skip(1).collect();
 
@@ -624,6 +678,26 @@ fn is_performance_root(path_expr: &PathExpr) -> bool {
 fn performance_path_type(path_expr: &PathExpr) -> EcelType {
     match path_expr.segments.as_slice() {
         [PathSegment::Field(_root), PathSegment::Field(name)] if name == "in_budget" => {
+            EcelType::Bool
+        }
+        _ => EcelType::Unknown,
+    }
+}
+
+/// Whether `path_expr` is rooted at the `safety` keyword (the Safety
+/// Supplement's `safety.sil_maintained`, see `docs/reference/
+/// safety-supplement.md`) rather than the ordinary `message` root.
+fn is_safety_root(path_expr: &PathExpr) -> bool {
+    matches!(path_expr.segments.first(), Some(PathSegment::Field(s)) if s == "safety")
+}
+
+/// `safety.sil_maintained` (exactly two segments, the second literally
+/// `sil_maintained`) types as `Bool`; anything else under the `safety`
+/// root is `Unknown` here — mirrors `reliability_path_type`/
+/// `performance_path_type` exactly.
+fn safety_path_type(path_expr: &PathExpr) -> EcelType {
+    match path_expr.segments.as_slice() {
+        [PathSegment::Field(_root), PathSegment::Field(name)] if name == "sil_maintained" => {
             EcelType::Bool
         }
         _ => EcelType::Unknown,
@@ -825,6 +899,47 @@ eventTrees:
         doc_with_condition_and_supplement(condition_yaml, declare_supplement, "etdl.performance", "1.0")
     }
 
+    /// Generalizes further still: an arbitrary set of declared supplement
+    /// ids (all version `"1.0"`) — needed for `safety.sil_maintained`,
+    /// the one ECEL path gated on *two* supplements at once rather than
+    /// just one.
+    fn doc_with_condition_and_supplements(condition_yaml: &str, supplement_ids: &[&str]) -> EtlDocument {
+        let supplements = if supplement_ids.is_empty() {
+            String::new()
+        } else {
+            let mut s = String::from("supplements:\n");
+            for id in supplement_ids {
+                s.push_str(&format!("  - id: {id}\n    version: \"1.0\"\n"));
+            }
+            s
+        };
+        let yaml = format!(
+            r##"
+etdl: "1.0.0"
+info: {{ title: "T", version: "1.0.0", domain: "D" }}
+{supplements}components:
+  messages:
+    M:
+      payload: {{ type: object }}
+eventTrees:
+  T:
+    initiatingEvent: {{ id: I, message: "#/components/messages/M", next: B }}
+    nodes:
+      B:
+        type: barrier
+        branches:
+          - outcome: NORMAL
+            condition: {condition_yaml}
+            next: C
+          - outcome: ABNORMAL
+            condition: default
+            next: C
+      C: {{ type: consequence, operation: terminate }}
+"##
+        );
+        serde_yaml::from_str(&yaml).unwrap()
+    }
+
     #[test]
     fn performance_in_budget_without_the_supplement_declared_is_e163() {
         let doc = doc_with_performance_condition("\"performance.in_budget == true\"", false);
@@ -885,6 +1000,97 @@ eventTrees:
         let doc = doc_with_performance_condition("\"performance.in_budget == 1\"", true);
         let diagnostics = type_check(&doc);
         assert!(!diagnostics.iter().any(|d| d.code == "E-163"), "got {diagnostics:?}");
+        assert!(diagnostics.iter().any(|d| d.code == "V-204"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn safety_sil_maintained_without_either_supplement_is_e135() {
+        let doc = doc_with_condition_and_supplements("\"safety.sil_maintained == true\"", &[]);
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-135"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn safety_sil_maintained_with_only_safety_declared_is_e135() {
+        // The two-supplement gate `safety.sil_maintained` alone has:
+        // `etdl.safety` isn't enough on its own, unlike every other ECEL
+        // path in this codebase, each gated on exactly one supplement.
+        let doc = doc_with_condition_and_supplements(
+            "\"safety.sil_maintained == true\"",
+            &["etdl.safety"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-135"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn safety_sil_maintained_with_only_live_reliability_declared_is_e135() {
+        let doc = doc_with_condition_and_supplements(
+            "\"safety.sil_maintained == true\"",
+            &["etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-135"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn safety_sil_maintained_with_both_supplements_declared_has_no_diagnostics() {
+        let doc = doc_with_condition_and_supplements(
+            "\"safety.sil_maintained == true\"",
+            &["etdl.safety", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.is_empty(), "unexpected: {diagnostics:?}");
+    }
+
+    #[test]
+    fn safety_wrong_shape_is_e135_even_with_both_supplements_declared() {
+        let doc = doc_with_condition_and_supplements(
+            "\"safety.something_else == true\"",
+            &["etdl.safety", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(diagnostics.iter().any(|d| d.code == "E-135"), "got {diagnostics:?}");
+    }
+
+    #[test]
+    fn safety_sil_maintained_combined_with_and_is_e135() {
+        let doc = doc_with_condition_and_supplements(
+            "\"safety.sil_maintained == true && message.payload.qty > 0\"",
+            &["etdl.safety", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "E-135" && d.message.contains("entire branch condition")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn safety_sil_maintained_negated_is_e135() {
+        let doc = doc_with_condition_and_supplements(
+            "\"!(safety.sil_maintained == true)\"",
+            &["etdl.safety", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == "E-135" && d.message.contains("entire branch condition")),
+            "got {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn safety_sil_maintained_compared_against_a_number_is_v204() {
+        let doc = doc_with_condition_and_supplements(
+            "\"safety.sil_maintained == 1\"",
+            &["etdl.safety", "etdl.live-reliability"],
+        );
+        let diagnostics = type_check(&doc);
+        assert!(!diagnostics.iter().any(|d| d.code == "E-135"), "got {diagnostics:?}");
         assert!(diagnostics.iter().any(|d| d.code == "V-204"), "got {diagnostics:?}");
     }
 }

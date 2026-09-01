@@ -42,6 +42,14 @@ gen-check-live-reliability-consumer = ["etdl-core/live-reliability"]
 # `etdl_core::perf` is always compiled in (no feature to enable) — see
 # docs/reference/performance-supplement.md.
 gen-check-performance = []
+# Runs the safety-check fixture's generated handler, driving
+# `etdl_core::live::record_observation` directly (same mechanism
+# `gen-check-live-reliability` uses) to prove safety.sil_maintained-driven
+# branch selection actually flips to the fail-safe path once the linked
+# fault tree's live probability drifts outside the barrier's declared
+# SIL band — not just that it compiles. See
+# docs/reference/safety-supplement.md.
+gen-check-safety = ["etdl-core/live-reliability"]
 
 [dependencies]
 etdl-core = { path = "../../../etdl-core" }

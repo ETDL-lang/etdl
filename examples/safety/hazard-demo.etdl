@@ -1,12 +1,18 @@
 # Safety Supplement demo: one Hazard classified against the Section 4.1
 # risk matrix, and two Safety Barriers (RetryBarrier / FallbackBarrier)
-# each given a Safety Integrity Level. The two barriers declare mutual
+# each given a Safety Integrity Level, verified against their resolved
+# failure probability (Section 6.1). The two barriers declare mutual
 # independentOf each other but sit on genuinely different network paths
-# (different commonCauseGroup), so this document is valid — see
-# contradictory-independence.etdl for the E-132 counter-example. Purely
-# declarative: no new probability math, no runtime enforcement — comment
-# out the `etdl.safety` line under `supplements:` below and re-validate to
-# see that for yourself.
+# (different commonCauseGroup, and — per Section 6.3's structural check —
+# genuinely non-overlapping Fault Trees), so this document is valid — see
+# contradictory-independence.etdl for the E-132 counter-example and
+# shared-cause.etdl for the E-134 one. RetryBarrier's FAILURE branch is
+# backed by a real Fault Tree (GatewayFailure) rather than a static
+# probability literal specifically so it can be live-tracked: with
+# `etdl.live-reliability` also declared, its SUCCESS branch is driven by
+# `safety.sil_maintained` — comment out the `etdl.safety` line under
+# `supplements:` below and re-validate to see this is still additive,
+# opt-in metadata, never a precondition for parsing or validation.
 
 etdl: "1.0.0"
 info:
@@ -17,9 +23,32 @@ info:
 supplements:
   - id: etdl.safety
     version: "1.0"
+  - id: etdl.live-reliability
+    version: "1.0"
 
 asyncapi_imports:
   api: "./api.yaml"
+
+faultTrees:
+  GatewayFailure:
+    description: "Live-tracked failure probability behind RetryBarrier."
+    topEvent:
+      id: GatewayFailureTop
+      description: "The primary payment gateway is unreachable."
+      rootCause: GatewayUnreachable
+    basicEvents:
+      GatewayUnreachable:
+        description: "The payment gateway cannot be reached."
+        probability: 0.005
+
+x-live-reliability:
+  faultTrees:
+    - id: GatewayFailure
+      threshold: 0.01
+      basicEvents:
+        - id: GatewayUnreachable
+          source: local
+          priorStrength: 10
 
 eventTrees:
   OrderFulfillment:
@@ -31,6 +60,16 @@ eventTrees:
       RetryBarrier:
         type: barrier
         branches:
+          - outcome: FAILURE
+            condition: "safety.sil_maintained == false"
+            probabilitySource: "#/faultTrees/GatewayFailure/topEvent"
+            next: FallbackBarrier
+          - outcome: SUCCESS
+            condition: default
+            next: ProcessPaymentOperation
+      FallbackBarrier:
+        type: barrier
+        branches:
           - outcome: SUCCESS
             condition: "message.payload.gatewayReachable == true"
             probability: 0.95
@@ -38,17 +77,6 @@ eventTrees:
           - outcome: FAILURE
             condition: default
             probability: 0.05
-            next: FallbackBarrier
-      FallbackBarrier:
-        type: barrier
-        branches:
-          - outcome: SUCCESS
-            condition: "message.payload.gatewayReachable == true"
-            probability: 0.5
-            next: ProcessPaymentOperation
-          - outcome: FAILURE
-            condition: default
-            probability: 0.5
             next: PaymentFailedConsequence
       ProcessPaymentOperation:
         type: operation
@@ -76,10 +104,12 @@ x-safety:
     - id: retry-barrier
       nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
       sil: 2
+      failureOutcome: FAILURE
       independentOf: ["fallback-gateway-barrier"]
       commonCauseGroup: "primary-network-path"
     - id: fallback-gateway-barrier
       nodeRef: "#/eventTrees/OrderFulfillment/nodes/FallbackBarrier"
       sil: 1
+      failureOutcome: FAILURE
       independentOf: ["retry-barrier"]
       commonCauseGroup: "secondary-network-path"

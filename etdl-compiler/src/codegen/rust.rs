@@ -37,6 +37,10 @@ struct CodegenCtx<'a> {
     /// for a document that doesn't declare `etdl.performance` — every
     /// codegen site that consults it is then a no-op.
     performance: &'a crate::performance::PerformanceData,
+    /// Parsed once per `generate_all` call, same rationale as the two
+    /// above. Empty (`hazards`/`barriers: vec![]`) for a document that
+    /// doesn't declare `etdl.safety`.
+    safety: &'a crate::safety::SafetyData,
 }
 
 impl Default for RustCodeGenerator {
@@ -105,6 +109,14 @@ impl CodeGenerator for RustCodeGenerator {
             output.push_str(&perf_registration);
         }
 
+        // Same "already validated, diagnostics deliberately discarded"
+        // rationale as `live_reliability`/`performance` above. No
+        // registration codegen of its own — `safety.sil_maintained` only
+        // ever reads `etdl_core::live::current_probability`, which
+        // `live_reliability`'s own registration already guarantees is
+        // populated for any fault tree it names.
+        let (safety, _safety_diagnostics) = crate::safety::parse_and_validate_safety(doc);
+
         for (tree_id, tree) in &doc.event_trees {
             let ctx = CodegenCtx {
                 doc,
@@ -113,6 +125,7 @@ impl CodeGenerator for RustCodeGenerator {
                 message_ref: &tree.initiating_event.message,
                 live_reliability: &live_reliability,
                 performance: &performance,
+                safety: &safety,
             };
             let handler_code = generate_event_tree_handler(&ctx, tree_id, tree)?;
             output.push_str(&handler_code);
@@ -475,17 +488,21 @@ fn render_record_branch_call(
     )
 }
 
-/// Renders a branch's condition: `reliability.in_range == <bool>` and
-/// `performance.in_budget == <bool>` (the only shapes typeck's E-173/E-163
-/// permit for their respective roots, and only as the *entire* condition,
-/// never nested — see `typeck::check_bool_expr`'s `top_level` doc comment)
-/// become a direct `etdl_core::live::in_range`/`etdl_core::perf::in_budget`
-/// call; everything else renders exactly as before. Errors (not silently
-/// generates broken code) if the branch's own `probability_source`
-/// (reliability) or the enclosing barrier's own `x-performance.barrierChecks`
-/// entry (performance) doesn't resolve — this should be unreachable given
-/// typeck's E-173/E-163 already require the relevant supplement to be
-/// declared, but a codegen-level check stays defensive rather than
+/// Renders a branch's condition: `reliability.in_range == <bool>`,
+/// `performance.in_budget == <bool>`, and `safety.sil_maintained == <bool>`
+/// (the only shapes typeck's E-173/E-163/E-135 permit for their respective
+/// roots, and only as the *entire* condition, never nested — see
+/// `typeck::check_bool_expr`'s `top_level` doc comment) become a direct
+/// `etdl_core::live::in_range`/`etdl_core::perf::in_budget`/
+/// `etdl_core::live::current_probability`-based call; everything else
+/// renders exactly as before. Errors (not silently generates broken code)
+/// if the relevant link doesn't resolve — the branch's own
+/// `probability_source` (reliability), the enclosing barrier's own
+/// `x-performance.barrierChecks` entry (performance), or the enclosing
+/// barrier's `x-safety.barriers` entry/its `failureOutcome`'s Fault Tree
+/// not being live-tracked (safety) — this should be unreachable given
+/// typeck's E-173/E-163/E-135 already require the relevant supplement(s)
+/// to be declared, but a codegen-level check stays defensive rather than
 /// trusting that alone.
 fn render_condition(
     ctx: &CodegenCtx,
@@ -498,6 +515,9 @@ fn render_condition(
             return Ok(rendered);
         }
         if let Some(rendered) = try_render_performance_condition(ctx, tree_id, node_id, cmp)? {
+            return Ok(rendered);
+        }
+        if let Some(rendered) = try_render_safety_condition(ctx, tree_id, node_id, cmp)? {
             return Ok(rendered);
         }
     }
@@ -601,6 +621,116 @@ fn try_render_performance_condition(
 
     let call = format!("etdl_core::perf::in_budget({budget_id:?})");
     Ok(Some(if negate { format!("!{call}") } else { call }))
+}
+
+/// The Safety Barrier Object whose `nodeRef` names this specific Barrier
+/// node — a Safety Barrier's own `nodeRef` *is* the barrier, so (unlike
+/// Performance's `barrierChecks`) no extra linking object is needed.
+fn safety_barrier_for<'a>(
+    ctx: &'a CodegenCtx,
+    tree_id: &str,
+    node_id: &str,
+) -> Option<&'a crate::safety::SafetyBarrier> {
+    let target = format!("#/eventTrees/{tree_id}/nodes/{node_id}");
+    ctx.safety.barriers.iter().find(|b| b.node_ref == target)
+}
+
+/// Mirrors `try_render_reliability_condition`/`try_render_performance_condition`,
+/// for `safety.sil_maintained` — with an extra layer of resolution neither
+/// of those needs: a Safety Barrier's own `nodeRef` already names this
+/// barrier (`safety_barrier_for`), but *its* linked Fault Tree is one more
+/// step away, through the barrier's own `failureOutcome` branch's
+/// `probability_source` (spec Section 6.2) — and that Fault Tree must
+/// *also* be declared under `x-live-reliability` for there to be any live
+/// value to read at all.
+fn try_render_safety_condition(
+    ctx: &CodegenCtx,
+    tree_id: &str,
+    node_id: &str,
+    cmp: &ecel::Comparison,
+) -> Result<Option<String>, String> {
+    fn is_safety_path(op: &ecel::Operand) -> bool {
+        matches!(
+            op,
+            ecel::Operand::Value(ecel::ValueExpr::Path(p))
+                if matches!(p.segments.first(), Some(ecel::PathSegment::Field(s)) if s == "safety")
+        )
+    }
+
+    let literal_side = if is_safety_path(&cmp.left) {
+        &cmp.right
+    } else if is_safety_path(&cmp.right) {
+        &cmp.left
+    } else {
+        return Ok(None);
+    };
+
+    let expect_true = match literal_side {
+        ecel::Operand::Literal(ecel::Literal::Bool(b)) => *b,
+        // typeck's V-204 already rejects comparing a Bool-typed path
+        // against anything but a bool literal — unreachable in practice.
+        _ => return Ok(None),
+    };
+    let negate = match cmp.op {
+        ecel::Comparator::Eq => !expect_true,
+        ecel::Comparator::Neq => expect_true,
+        _ => return Ok(None),
+    };
+
+    let Some(barrier) = safety_barrier_for(ctx, tree_id, node_id) else {
+        return Err(
+            "branch condition uses 'safety.sil_maintained' but this barrier has no \
+             x-safety.barriers entry naming it"
+                .to_string(),
+        );
+    };
+
+    let Some(branch) = crate::safety::resolve_failure_branch(ctx.doc, barrier) else {
+        // Unreachable given `ctx.safety.barriers` only ever contains
+        // barriers whose `failureOutcome` already resolved (E-131
+        // otherwise, which would have kept it out of `SafetyData` — see
+        // `parse_and_validate_safety`) — defensive, not trusted blindly.
+        return Err(format!(
+            "safety barrier '{}': failureOutcome '{}' does not resolve to a branch",
+            barrier.id, barrier.failure_outcome
+        ));
+    };
+
+    let Some(ref ps) = branch.probability_source else {
+        return Err(format!(
+            "safety barrier '{}': failureOutcome '{}' has a static-literal probability, \
+             no Fault Tree to live-track for 'safety.sil_maintained'",
+            barrier.id, barrier.failure_outcome
+        ));
+    };
+
+    let ft_id = extract_ft_id(&ps.pointer);
+    let Some(fault_tree) = ctx.doc.fault_trees.as_ref().and_then(|fts| fts.get(&ft_id)) else {
+        return Err(format!(
+            "safety barrier '{}': failureOutcome '{}' references fault tree '{ft_id}', which \
+             does not exist",
+            barrier.id, barrier.failure_outcome
+        ));
+    };
+    if !ctx.live_reliability.fault_trees.iter().any(|d| d.id == ft_id) {
+        return Err(format!(
+            "branch condition uses 'safety.sil_maintained' but fault tree '{ft_id}' (behind \
+             safety barrier '{}') is not declared under etdl.live-reliability",
+            barrier.id
+        ));
+    }
+
+    // `root_cause`, not `top_event.id` — the same lesson Live Reliability's
+    // own registration codegen already learned (see
+    // `generate_live_reliability_registration`'s matching comment): `id`
+    // is a human-readable label never used for resolution anywhere else.
+    let node = &fault_tree.top_event.root_cause;
+    let (low, high) = crate::safety::sil_pfd_band(barrier.sil);
+
+    let call = format!(
+        "etdl_core::live::current_probability({ft_id:?}, {node:?}).map(|p| p >= {low:.6} && p < {high:.6}).unwrap_or(true)"
+    );
+    Ok(Some(if negate { format!("!({call})") } else { call }))
 }
 
 /// Resolve an `onFailureProbabilitySource` internal reference to its fault-tree
@@ -1867,7 +1997,12 @@ fn schema_to_rust_type(candidate_name: &str, schema: &serde_json::Value, nested:
     }
 }
 
-fn get_branch_prob(
+/// `pub(crate)`, not private — `safety::validate_sil_constraints` reuses
+/// this exact resolution (static literal or fault-tree-derived) rather
+/// than re-deriving it, since a Safety Barrier's `failureOutcome` branch
+/// resolves a probability the same way any other branch does (spec
+/// Section 6.1).
+pub(crate) fn get_branch_prob(
     branch: &etdl_parser::ast::Branch,
     _node_id: &str,
     fault_tree_probs: &BTreeMap<String, f64>,
@@ -1879,7 +2014,9 @@ fn get_branch_prob(
     branch.effective_probability()
 }
 
-fn extract_ft_id(pointer: &str) -> String {
+/// `pub(crate)`, not private — `safety::check_empirical_independence`
+/// reuses this exact pointer-parsing logic rather than re-deriving it.
+pub(crate) fn extract_ft_id(pointer: &str) -> String {
     pointer
         .trim_start_matches("#/faultTrees/")
         .trim_end_matches("/topEvent")
@@ -2040,6 +2177,7 @@ faultTrees:
         let (doc, probs, registry, message_ref) = test_fixture();
         let live_reliability = crate::live_reliability::LiveReliabilityData::default();
         let performance = crate::performance::PerformanceData::default();
+        let safety = crate::safety::SafetyData::default();
         let ctx = CodegenCtx {
             doc: &doc,
             fault_tree_probs: &probs,
@@ -2047,6 +2185,7 @@ faultTrees:
             message_ref: &message_ref,
             live_reliability: &live_reliability,
             performance: &performance,
+            safety: &safety,
         };
         condition_to_rust_code(&ctx, &cond)
     }

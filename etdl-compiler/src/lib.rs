@@ -235,6 +235,13 @@ impl Compiler {
             return diagnostics;
         }
 
+        // The one place `etdl.safety` needs a direct call rather than the
+        // generic extension path — see `safety::validate_sil_constraints`'s
+        // own doc comment for why. Placed here, right after
+        // `fault_tree_probs` is resolved, so `etdl validate` (not just
+        // `etdl compile`) catches a SIL/PFD mismatch.
+        safety::validate_sil_constraints(doc, &fault_tree_probs, &mut diagnostics);
+
         typeck::type_check_conditions(doc, asyncapi_registry, &mut diagnostics);
 
         diagnostics

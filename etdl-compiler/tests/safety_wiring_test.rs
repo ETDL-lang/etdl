@@ -43,6 +43,7 @@ x-safety:
     - id: b1
       nodeRef: "#/eventTrees/OrderFulfillment/nodes/Barrier"
       sil: 9
+      failureOutcome: SUCCESS
 "##;
 
 // A mismatched-riskIndex document: W-410 is a *warning*, not an error, so
@@ -87,6 +88,54 @@ x-safety:
       likelihood: remote
       riskIndex: 4
       consequenceRef: "#/eventTrees/OrderFulfillment/nodes/C"
+"##;
+
+// A fault-tree-backed FAILURE branch whose resolved probability (0.05)
+// sits well outside the SIL 3 band [1e-4, 1e-3) the barrier declares —
+// `validate_sil_constraints` needs *resolved* fault-tree probabilities,
+// which only exist after `Compiler::validate_with_base`'s own pipeline
+// runs `fault_tree::resolve_fault_trees_with_overrides` — this is the
+// proof that actually happens, not something a unit test calling
+// `parse_and_validate_safety`/`validate_sil_constraints` directly (as
+// `safety.rs`'s own tests do) could ever catch.
+const DOC_WITH_SIL_PFD_MISMATCH: &str = r##"
+etdl: "1.0.0"
+info:
+  title: "T"
+  version: "1.0.0"
+  domain: "D"
+asyncapi_imports:
+  a: "./stub.yaml"
+supplements:
+  - id: etdl.safety
+    version: "1.0"
+faultTrees:
+  GatewayFailure:
+    topEvent: { id: Top, description: "d", rootCause: BE }
+    basicEvents:
+      BE: { description: "d", probability: 0.05 }
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent: { id: I, message: "a#/components/messages/m", next: Barrier }
+    nodes:
+      Barrier:
+        type: barrier
+        branches:
+          - outcome: SUCCESS
+            condition: "message.payload.ok == true"
+            probability: 0.95
+            next: C
+          - outcome: FAILURE
+            condition: default
+            probabilitySource: "#/faultTrees/GatewayFailure/topEvent"
+            next: C
+      C: { type: consequence, operation: terminate }
+x-safety:
+  barriers:
+    - id: b1
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/Barrier"
+      sil: 3
+      failureOutcome: FAILURE
 "##;
 
 const DOC_WITHOUT_SAFETY: &str = r##"
@@ -158,6 +207,24 @@ fn warning_only_diagnostic_is_not_duplicated_by_process() {
 }
 
 #[test]
+fn sil_pfd_mismatch_surfaces_through_compiler_validate_not_just_compile() {
+    let doc: EtlDocument = serde_yaml::from_str(DOC_WITH_SIL_PFD_MISMATCH).expect("doc parses");
+    let registry = stub_registry();
+
+    let diagnostics = Compiler::new().validate(&doc, &registry);
+
+    assert!(
+        diagnostics.iter().any(|d| d.code == "E-133"),
+        "expected E-133 (SIL 3 declared, resolved probability 0.05 far outside \
+         its [1e-4, 1e-3) band) to surface through Compiler::validate itself \
+         — validate_sil_constraints is called from validate_with_base \
+         specifically so etdl validate (not only etdl compile) catches this \
+         before any code exists, got {:?}",
+        diagnostics.iter().map(|d| &d.code).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn document_not_declaring_safety_is_unaffected() {
     // Compatibility guarantee (spec Section 7): silently ignoring
     // `x-safety` (never declared under `supplements:`) leaves the document
@@ -218,6 +285,7 @@ x-safety:
     - id: b1
       nodeRef: "#/eventTrees/OrderFulfillment/nodes/Barrier"
       sil: 9
+      failureOutcome: SUCCESS
 "##,
     )
     .expect("doc parses");

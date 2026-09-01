@@ -4,7 +4,11 @@ use std::collections::BTreeMap;
 
 use crate::validate::Diagnostic;
 
-mod rust;
+// `pub(crate)`, not private: `safety::validate_sil_constraints` reuses
+// `rust::get_branch_prob` (see its own doc comment) rather than
+// re-deriving branch-probability resolution — this crate's own external
+// API surface is unaffected, since `pub(crate)` never reaches outside it.
+pub(crate) mod rust;
 pub use rust::RustCodeGenerator;
 
 /// One file a target generator produces. `relative_path` is relative to the

@@ -1,0 +1,123 @@
+# E-134 counter-example: two Safety Barriers (RetryBarrier on the primary
+# path, FallbackBarrier on the secondary path) each backed by their own
+# Fault Tree, declared `independentOf` each other because they sit on
+# different network paths — but both Fault Trees resolve through the same
+# shared upstream `NetworkSwitchFailure` basic event, per
+# ETDL-Safety-Supplement.md Section 6.3's minimal-cut-set analysis. Unlike
+# contradictory-independence.etdl's E-132 (a self-contradiction among the
+# *declared* claims themselves), this is caught only by checking the
+# declared claim against the *actual* Fault Tree structure — the two
+# barriers don't even share a `commonCauseGroup` tag, so nothing here would
+# ever have been flagged before Part 5 of this supplement's enablement.
+# The declaration is intentionally one-directional (only `retry-barrier`
+# lists `fallback-gateway-barrier`) to also show E-134 does not require
+# mutual claims the way E-132 does.
+#
+#   etdl validate shared-cause.etdl
+#   -> [ERROR] E-134: x-safety: barrier retry-barrier declares independentOf
+#      fallback-gateway-barrier, but their failureOutcome branches' Fault
+#      Trees share basic event 'NetworkSwitchFailure' — the declared claim
+#      contradicts the actual fault-tree structure
+
+etdl: "1.0.0"
+info:
+  title: "Order Fulfillment (Safety Demo: shared cause)"
+  version: "1.0.0"
+  domain: "FulfillmentContext"
+
+supplements:
+  - id: etdl.safety
+    version: "1.0"
+
+components:
+  messages:
+    OrderPlaced:
+      name: OrderPlaced
+      payload:
+        type: object
+        properties:
+          forceFailure:
+            type: boolean
+
+faultTrees:
+  PrimaryGatewayFailure:
+    description: "Primary payment path: retried gateway call."
+    topEvent:
+      id: PrimaryGatewayFailureTop
+      description: "The primary gateway call ultimately fails."
+      rootCause: PrimaryGate
+    gates:
+      PrimaryGate:
+        type: OR
+        inputs: [NetworkSwitchFailure, PrimaryGatewayTimeout]
+    basicEvents:
+      NetworkSwitchFailure:
+        description: "The upstream network switch shared by both payment paths is down."
+        probability: 0.002
+      PrimaryGatewayTimeout:
+        description: "The primary payment gateway itself times out."
+        probability: 0.003
+
+  SecondaryGatewayFailure:
+    description: "Secondary payment path: fallback gateway call."
+    topEvent:
+      id: SecondaryGatewayFailureTop
+      description: "The secondary gateway call ultimately fails."
+      rootCause: SecondaryGate
+    gates:
+      SecondaryGate:
+        type: OR
+        inputs: [NetworkSwitchFailure, SecondaryGatewayTimeout]
+    basicEvents:
+      NetworkSwitchFailure:
+        description: "The same upstream network switch as the primary path — the shared cause this example demonstrates."
+        probability: 0.002
+      SecondaryGatewayTimeout:
+        description: "The secondary payment gateway itself times out."
+        probability: 0.03
+
+eventTrees:
+  OrderFulfillment:
+    initiatingEvent:
+      id: OrderPlacedTrigger
+      message: "#/components/messages/OrderPlaced"
+      next: RetryBarrier
+    nodes:
+      RetryBarrier:
+        type: barrier
+        branches:
+          - outcome: FAILURE
+            condition: "message.payload.forceFailure == true"
+            probabilitySource: "#/faultTrees/PrimaryGatewayFailure/topEvent"
+            next: FallbackBarrier
+          - outcome: SUCCESS
+            condition: default
+            next: FulfillmentConsequence
+      FallbackBarrier:
+        type: barrier
+        branches:
+          - outcome: FAILURE
+            condition: "message.payload.forceFailure == true"
+            probabilitySource: "#/faultTrees/SecondaryGatewayFailure/topEvent"
+            next: PaymentFailedConsequence
+          - outcome: SUCCESS
+            condition: default
+            next: FulfillmentConsequence
+      FulfillmentConsequence:
+        type: consequence
+        operation: terminate
+      PaymentFailedConsequence:
+        type: consequence
+        operation: terminate
+
+x-safety:
+  barriers:
+    - id: retry-barrier
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
+      sil: 2
+      failureOutcome: FAILURE
+      independentOf: ["fallback-gateway-barrier"]
+    - id: fallback-gateway-barrier
+      nodeRef: "#/eventTrees/OrderFulfillment/nodes/FallbackBarrier"
+      sil: 1
+      failureOutcome: FAILURE

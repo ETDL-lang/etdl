@@ -325,11 +325,12 @@ fn parse_path_expr(input: &str) -> IResult<&str, PathExpr> {
 }
 
 /// `message` is the ordinary root every path expression has always used.
-/// `reliability` and `performance` are narrower roots two optional,
-/// off-by-default supplements each reserve — grammar-wise both parse like
-/// any other path (`reliability.in_range`, `performance.in_budget`,
-/// generic dotted chains), but only their one specific exact shape is
-/// meaningful; anything else under either root is a type error reported by
+/// `reliability`, `performance`, and `safety` are narrower roots three
+/// optional, off-by-default supplements each reserve — grammar-wise all
+/// three parse like any other path (`reliability.in_range`,
+/// `performance.in_budget`, `safety.sil_maintained`, generic dotted
+/// chains), but only their one specific exact shape is meaningful;
+/// anything else under any of them is a type error reported by
 /// `etdl-compiler::typeck`, not a parse error, matching how this codebase
 /// already prefers "structure via grammar, rules via explicit checks" over
 /// rejecting shapes at parse time.
@@ -338,6 +339,7 @@ fn parse_root_var(input: &str) -> IResult<&str, String> {
         value("message".to_string(), tag("message")),
         value("reliability".to_string(), tag("reliability")),
         value("performance".to_string(), tag("performance")),
+        value("safety".to_string(), tag("safety")),
     ))(input)
 }
 
@@ -568,6 +570,34 @@ mod tests {
                         assert_eq!(p.segments.len(), 2);
                         assert_eq!(p.segments[0], PathSegment::Field("performance".to_string()));
                         assert_eq!(p.segments[1], PathSegment::Field("in_budget".to_string()));
+                    }
+                    _ => panic!("expected path"),
+                }
+                match &c.right {
+                    Operand::Literal(Literal::Bool(b)) => assert!(*b),
+                    _ => panic!("expected bool literal"),
+                }
+            }
+            _ => panic!("expected comparison"),
+        }
+    }
+
+    #[test]
+    fn test_safety_root_parses_like_any_other_path() {
+        // Grammar-level only, mirroring the `reliability`/`performance`
+        // root tests above: `safety.sil_maintained` (the Safety
+        // Supplement's own SIL-live-check ECEL path) parses generically,
+        // no special grammar case — see `parse_root_var`'s doc comment.
+        let cond = parse_condition("safety.sil_maintained == true").unwrap();
+        match cond {
+            Condition::Expr(expr) => {
+                let c = as_comparison(&expr);
+                assert_eq!(c.op, Comparator::Eq);
+                match &c.left {
+                    Operand::Value(ValueExpr::Path(p)) => {
+                        assert_eq!(p.segments.len(), 2);
+                        assert_eq!(p.segments[0], PathSegment::Field("safety".to_string()));
+                        assert_eq!(p.segments[1], PathSegment::Field("sil_maintained".to_string()));
                     }
                     _ => panic!("expected path"),
                 }

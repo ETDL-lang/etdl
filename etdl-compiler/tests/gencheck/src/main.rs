@@ -138,6 +138,52 @@ async fn main() {
         println!("gencheck live-reliability ran");
     }
 
+    // Proves the safety-check fixture's generated code actually behaves
+    // live, not just compiles: same mechanism as `gen-check-live-reliability`
+    // above (`record_observation` called directly, as an embedding
+    // application would), but this fixture's branch condition is
+    // `safety.sil_maintained`, not `reliability.in_range` — a genuinely
+    // different codegen path (`try_render_safety_condition`) checking a
+    // different band (the barrier's declared SIL, not a threshold) — see
+    // docs/reference/safety-supplement.md.
+    #[cfg(feature = "gen-check-safety")]
+    {
+        let publisher = ChannelCapturingPublisher::new();
+
+        // Freshly registered: current value == baseline == the declared
+        // prior (0.005), inside the fixture's SIL 2 band [1e-3, 1e-2).
+        let msg = Trigger {
+            payload: serde_json::json!({}),
+            headers: None,
+        };
+        handle_safety_trigger(msg, &publisher).await.unwrap();
+        assert!(
+            publisher.published_to("normal-channel"),
+            "expected the SUCCESS branch (SIL maintained) on a fresh baseline"
+        );
+        assert!(!publisher.published_to("failsafe-channel"));
+
+        // Drive the basic event's live estimate far out of the SIL 2 band
+        // — 200 "occurred" observations pull it from a 0.005 prior toward
+        // 1.0, well past the band's 0.01 upper bound.
+        for _ in 0..200 {
+            etdl_core::live::record_observation("GatewayFailure", "GatewayUnreachable", true);
+        }
+
+        let msg2 = Trigger {
+            payload: serde_json::json!({}),
+            headers: None,
+        };
+        handle_safety_trigger(msg2, &publisher).await.unwrap();
+        assert!(
+            publisher.published_to("failsafe-channel"),
+            "expected the FAILURE (fail-safe) branch once the live probability drifted \
+             outside the declared SIL's band"
+        );
+
+        println!("gencheck safety ran");
+    }
+
     // Two-service cross-process proof (see live-reliability-producer.etdl /
     // live-reliability-consumer.etdl and Cargo.toml's feature comments):
     // this process plays exactly one role, decided at compile time by which

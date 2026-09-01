@@ -110,13 +110,20 @@ only produced when a document declares `supplements: [{id: etdl.diagnostics,
 ## Safety Supplement (E-13x / W-410)
 
 `etdl.safety` (`docs/reference/safety-supplement.md`) diagnostics, only
-produced when a document declares `supplements: [{id: etdl.safety, ...}]`:
+produced when a document declares `supplements: [{id: etdl.safety, ...}]`.
+Like Performance/Live Reliability below, a declared `sil` and a declared
+`independentOf` claim are **verified against the document's own resolved
+numbers**, not just checked for self-consistency — see that doc's
+Section 6.
 
 | Code | Condition | Suggestion |
 |---|---|---|
 | E-130 | a Hazard's `severity`/`likelihood`/`riskIndex`, or a Safety Barrier's `sil`, is invalid; `hazards`/`barriers` failed to deserialize; or a duplicate id was declared | fix the value / id |
-| E-131 | a Hazard's `consequenceRef`, or a Safety Barrier's `nodeRef`, doesn't resolve to a node of the required kind | fix the reference |
+| E-131 | a Hazard's `consequenceRef`, or a Safety Barrier's `nodeRef`, doesn't resolve to a node of the required kind; or a Safety Barrier's `failureOutcome` doesn't match one of that Barrier node's own branch outcomes | fix the reference / `failureOutcome` |
 | E-132 | two Safety Barriers mutually claim `independentOf` each other while sharing a non-empty `commonCauseGroup` | remove the contradiction (drop the mutual claim, or use distinct groups) |
+| E-133 | a Safety Barrier's `failureOutcome` branch resolves to a probability outside the IEC 61508 PFD band its declared `sil` implies | adjust `sil` to match the resolved probability, or fix whatever is driving that probability |
+| E-134 | two Safety Barriers declare `independentOf` each other (one-directional) while their `failureOutcome` branches' Fault Trees share a basic event, per minimal-cut-set analysis | remove the `independentOf` claim, or eliminate the shared basic event |
+| E-135 | a branch condition uses the `safety.*` ECEL path root without the document declaring `etdl.safety`, without also declaring `etdl.live-reliability`, or the path isn't exactly `safety.sil_maintained` | declare both supplements, or fix the path/shape |
 | W-410 | a Hazard's declared `riskIndex` doesn't match the Section 4.1 risk matrix for its severity/likelihood | adjust `riskIndex` to match, or document why it's intentionally more conservative |
 
 ## Performance Supplement (E-16x / W-41x)

@@ -1,0 +1,79 @@
+etdl: "1.0.0"
+info:
+  title: "Safety Supplement end-to-end check"
+  version: "1.0.0"
+  domain: "Test"
+  description: "Exercises etdl.safety's runtime teeth: a Safety Barrier whose branch selection is driven by safety.sil_maintained against a fault tree's live-tracked top event, mirroring live-reliability.etdl's own RiskBarrier pattern but through the safety.* ECEL path (which additionally requires etdl.live-reliability declared). No asyncapi_imports — inline components.messages, matching live-reliability.etdl's pattern."
+
+supplements:
+  - id: etdl.safety
+    version: "1.0"
+  - id: etdl.live-reliability
+    version: "1.0"
+
+components:
+  messages:
+    Trigger:
+      name: Trigger
+      payload:
+        type: object
+
+faultTrees:
+  GatewayFailure:
+    description: "A single basic event, live-tracked."
+    topEvent:
+      id: GatewayFailureTop
+      description: "The gateway is unreachable."
+      rootCause: GatewayUnreachable
+    basicEvents:
+      GatewayUnreachable:
+        description: "The payment gateway cannot be reached."
+        probability: 0.005
+
+x-live-reliability:
+  faultTrees:
+    - id: GatewayFailure
+      threshold: 0.3
+      basicEvents:
+        - id: GatewayUnreachable
+          source: local
+          priorStrength: 10
+
+x-safety:
+  barriers:
+    - id: risk-barrier
+      nodeRef: "#/eventTrees/SafetyCheck/nodes/RiskBarrier"
+      sil: 2
+      failureOutcome: FAILURE
+
+eventTrees:
+  SafetyCheck:
+    initiatingEvent:
+      id: SafetyTrigger
+      message: "#/components/messages/Trigger"
+      next: RiskBarrier
+
+    nodes:
+      RiskBarrier:
+        type: barrier
+        description: "Branch selection is driven by whether the declared SIL is currently maintained live, not an ordinary payload comparison."
+        branches:
+          - outcome: FAILURE
+            condition: "safety.sil_maintained == false"
+            probabilitySource: "#/faultTrees/GatewayFailure/topEvent"
+            next: FailSafeConsequence
+          - outcome: SUCCESS
+            condition: "default"
+            next: NormalConsequence
+
+      NormalConsequence:
+        type: consequence
+        operation: send
+        channel: "normal-channel"
+        message: "#/components/messages/Trigger"
+
+      FailSafeConsequence:
+        type: consequence
+        operation: send
+        channel: "failsafe-channel"
+        message: "#/components/messages/Trigger"

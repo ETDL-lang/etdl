@@ -1,6 +1,6 @@
 use etdl_parser::ast::{EtlDocument, FaultTree, GateType};
 use etdl_parser::spanned::SpanKey;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use crate::validate::Diagnostic;
 
@@ -373,27 +373,40 @@ fn minimize_rows(rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
             row
         })
         .collect();
+    sorted_rows.sort();
+    sorted_rows.dedup();
 
-    let mut i = 0;
-    while i < sorted_rows.len() {
-        let row_i = sorted_rows[i].clone();
-        sorted_rows.retain(|row_j| {
-            if std::ptr::eq(row_j, &row_i) {
-                return true;
+    // Drop every row that has a *different* (index-distinct) row as a
+    // subset of it — that other row already implies it, so it is
+    // redundant. Indices (not `std::ptr::eq` on cloned `Vec`s, which never
+    // matches its own source and previously caused every row, including
+    // ones with no true superset, to be discarded as "subset of itself")
+    // are what make a row distinguishable from itself here.
+    let mut keep = vec![true; sorted_rows.len()];
+    for i in 0..sorted_rows.len() {
+        let set_i: BTreeSet<&String> = sorted_rows[i].iter().collect();
+        for j in 0..sorted_rows.len() {
+            if i == j || !keep[j] {
+                continue;
             }
-            let set_i: std::collections::BTreeSet<_> = row_i.iter().collect();
-            let set_j: std::collections::BTreeSet<_> = row_j.iter().collect();
-            !set_i.is_subset(&set_j)
-        });
-        i += 1;
+            let set_j: BTreeSet<&String> = sorted_rows[j].iter().collect();
+            if set_i.is_subset(&set_j) {
+                keep[j] = false;
+            }
+        }
     }
 
     sorted_rows
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(row, k)| k.then_some(row))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use etdl_parser::ast::{BasicEvent, Gate, TopEvent};
 
     #[test]
     fn inhibit_gate_is_product() {
@@ -462,5 +475,99 @@ mod tests {
     #[test]
     fn priority_and_requires_two_inputs() {
         assert!(compute_gate_probability(&GateType::PriorityAnd, &[0.1], None).is_err());
+    }
+
+    fn basic_event(probability: f64) -> BasicEvent {
+        BasicEvent {
+            description: "d".to_string(),
+            probability: Some(probability),
+            failure_rate: None,
+            mission_time: None,
+            undeveloped: None,
+            event_type: None,
+            message: None,
+            extensions: Default::default(),
+        }
+    }
+
+    // A single OR gate over two basic events has two minimal cut sets, one
+    // per input — this is the smallest fixture that distinguishes "correct
+    // reduction" from a `minimize_rows` bug that discards every row as a
+    // trivial "subset of itself" (a real bug this reproduced: comparing
+    // `std::ptr::eq` against a freshly cloned row never matches the row's
+    // own list entry, so every row was treated as a redundant superset of
+    // itself and the function always returned `Ok(vec![])`).
+    #[test]
+    fn or_gate_produces_one_cut_set_per_input() {
+        let ft = FaultTree {
+            top_event: TopEvent {
+                id: "Top".to_string(),
+                description: "d".to_string(),
+                message: None,
+                root_cause: "Gate".to_string(),
+            },
+            gates: Some(BTreeMap::from([(
+                "Gate".to_string(),
+                Gate {
+                    gate_type: GateType::Or,
+                    inputs: vec!["A".to_string(), "B".to_string()],
+                    k: None,
+                    description: None,
+                    inhibit_condition: None,
+                },
+            )])),
+            basic_events: BTreeMap::from([
+                ("A".to_string(), basic_event(0.01)),
+                ("B".to_string(), basic_event(0.01)),
+            ]),
+            transfers: None,
+            description: None,
+        };
+
+        let mut cut_sets = enumerate_minimal_cut_sets(&ft).expect("coherent tree");
+        for row in &mut cut_sets {
+            row.sort();
+        }
+        cut_sets.sort();
+
+        assert_eq!(cut_sets, vec![vec!["A".to_string()], vec!["B".to_string()]]);
+    }
+
+    // An AND gate over two basic events has exactly one minimal cut set
+    // containing both — proves the reduction step keeps a single
+    // multi-element row instead of also discarding it.
+    #[test]
+    fn and_gate_produces_one_cut_set_with_both_inputs() {
+        let ft = FaultTree {
+            top_event: TopEvent {
+                id: "Top".to_string(),
+                description: "d".to_string(),
+                message: None,
+                root_cause: "Gate".to_string(),
+            },
+            gates: Some(BTreeMap::from([(
+                "Gate".to_string(),
+                Gate {
+                    gate_type: GateType::And,
+                    inputs: vec!["A".to_string(), "B".to_string()],
+                    k: None,
+                    description: None,
+                    inhibit_condition: None,
+                },
+            )])),
+            basic_events: BTreeMap::from([
+                ("A".to_string(), basic_event(0.01)),
+                ("B".to_string(), basic_event(0.01)),
+            ]),
+            transfers: None,
+            description: None,
+        };
+
+        let cut_sets = enumerate_minimal_cut_sets(&ft).expect("coherent tree");
+
+        assert_eq!(cut_sets.len(), 1, "got {cut_sets:?}");
+        let mut only = cut_sets[0].clone();
+        only.sort();
+        assert_eq!(only, vec!["A".to_string(), "B".to_string()]);
     }
 }

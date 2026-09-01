@@ -5,7 +5,12 @@
 # ETDL-Safety-Supplement.md Section 5's E-132. In hazard-demo.etdl the two
 # barriers sit on genuinely different network paths (different
 # commonCauseGroup) and validate cleanly; only the commonCauseGroup value
-# differs between the two files.
+# differs between the two files. Both barriers here use static probability
+# literals (no Fault Tree), so this stays a pure E-132 example and never
+# exercises the structural E-134 check (Section 6.3) — see
+# shared-cause.etdl for that counter-example instead. `sil`/probability are
+# kept inside their respective PFD bands (Section 6.1) so E-132 is the only
+# diagnostic this document produces.
 #
 #   etdl validate contradictory-independence.etdl
 #   -> [ERROR] E-132: x-safety: barriers fallback-gateway-barrier,
@@ -37,22 +42,22 @@ eventTrees:
         branches:
           - outcome: SUCCESS
             condition: "message.payload.gatewayReachable == true"
-            probability: 0.95
+            probability: 0.995
             next: ProcessPaymentOperation
           - outcome: FAILURE
             condition: default
-            probability: 0.05
+            probability: 0.005
             next: FallbackBarrier
       FallbackBarrier:
         type: barrier
         branches:
           - outcome: SUCCESS
             condition: "message.payload.gatewayReachable == true"
-            probability: 0.5
+            probability: 0.95
             next: ProcessPaymentOperation
           - outcome: FAILURE
             condition: default
-            probability: 0.5
+            probability: 0.05
             next: PaymentFailedConsequence
       ProcessPaymentOperation:
         type: operation
@@ -80,10 +85,12 @@ x-safety:
     - id: retry-barrier
       nodeRef: "#/eventTrees/OrderFulfillment/nodes/RetryBarrier"
       sil: 2
+      failureOutcome: FAILURE
       independentOf: ["fallback-gateway-barrier"]
       commonCauseGroup: "primary-network-path"
     - id: fallback-gateway-barrier
       nodeRef: "#/eventTrees/OrderFulfillment/nodes/FallbackBarrier"
       sil: 1
+      failureOutcome: FAILURE
       independentOf: ["retry-barrier"]
       commonCauseGroup: "primary-network-path"
